@@ -1,0 +1,792 @@
+[
+  {
+    "id": "Sheet1_0",
+    "name": "KZN",
+    "rank": "nan",
+    "city": "nan",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -28.503833,
+    "lng": 30.8875009
+  },
+  {
+    "id": "Sheet1_1",
+    "name": "CS 44 GV ZN - Taxi 1",
+    "rank": "Ethekwini Municipality",
+    "city": "KZN",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -29.812,
+    "lng": 30.8039
+  },
+  {
+    "id": "Sheet1_2",
+    "name": "BB 65 DH ZN - Taxi 14",
+    "rank": "Ethekwini Municipality",
+    "city": "KZN",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -29.8283,
+    "lng": 30.9944
+  },
+  {
+    "id": "Sheet1_3",
+    "name": "BY 84 WG ZN - Taxi 32",
+    "rank": "Ethekwini Municipality",
+    "city": "KZN",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -29.847,
+    "lng": 31.002
+  },
+  {
+    "id": "Sheet1_4",
+    "name": "CK 97 JN ZN- Taxi 23",
+    "rank": "Ethekwini Municipality",
+    "city": "KZN",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -29.812,
+    "lng": 30.8039
+  },
+  {
+    "id": "Sheet1_5",
+    "name": "BS 29 XK ZN- Taxi 26",
+    "rank": "Ethekwini Municipality",
+    "city": "KZN",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -29.7083861,
+    "lng": 31.0742703
+  },
+  {
+    "id": "Sheet1_6",
+    "name": "CD 12 BT ZN- Taxi 15",
+    "rank": "Ethekwini Municipality",
+    "city": "KZN",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -29.7083861,
+    "lng": 31.0742703
+  },
+  {
+    "id": "Sheet1_7",
+    "name": "CN 13 JG ZN- Taxi 21",
+    "rank": "Ethekwini Municipality",
+    "city": "KZN",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -29.8587,
+    "lng": 31.0218
+  },
+  {
+    "id": "Sheet1_8",
+    "name": "ND 250-536- Taxi 38",
+    "rank": "Ethekwini Municipality",
+    "city": "KZN",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -29.8283,
+    "lng": 30.8039
+  },
+  {
+    "id": "Sheet1_9",
+    "name": "BF 96 JP ZN- Taxi 18",
+    "rank": "Ethekwini Municipality",
+    "city": "KZN",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -29.8283,
+    "lng": 30.8039
+  },
+  {
+    "id": "Sheet1_10",
+    "name": "CR 09 VX ZN- Taxi 22",
+    "rank": "Ethekwini Municipality",
+    "city": "KZN",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -29.8587,
+    "lng": 31.0218
+  },
+  {
+    "id": "Sheet1_11",
+    "name": "BY 52 DR ZN- Taxi 20",
+    "rank": "Ethekwini Municipality",
+    "city": "KZN",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -29.7083861,
+    "lng": 31.0742703
+  },
+  {
+    "id": "Sheet1_12",
+    "name": "ND 879 120- Taxi 35",
+    "rank": "Ethekwini Municipality",
+    "city": "KZN",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -29.7083861,
+    "lng": 31.0742703
+  },
+  {
+    "id": "Sheet1_13",
+    "name": "CJ 67 YG ZN- Taxi 16",
+    "rank": "Ethekwini Municipality",
+    "city": "KZN",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -29.7083861,
+    "lng": 31.0742703
+  },
+  {
+    "id": "Sheet1_14",
+    "name": "RICHARDSBAY",
+    "rank": "nan",
+    "city": "nan",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -28.7707857,
+    "lng": 32.0577775
+  },
+  {
+    "id": "Sheet1_15",
+    "name": "CM 84 JJ ZN -TAXI 59",
+    "rank": "City of tswane",
+    "city": "Gauteng",
+    "route": "Bosman CBD rank \u2013 Atteridgeville",
+    "screens": 1,
+    "lat": -25.6475213,
+    "lng": 28.1279108
+  },
+  {
+    "id": "Sheet1_16",
+    "name": "UBUKA 35 ZN -TAXI 64",
+    "rank": "City of tswane",
+    "city": "Gauteng",
+    "route": "Bosman CBD rank \u2013 Boksburg",
+    "screens": 1,
+    "lat": -25.6475213,
+    "lng": 28.1279108
+  },
+  {
+    "id": "Sheet1_17",
+    "name": "BS 19 TP ZN- TAXI 47",
+    "rank": "City of tswane",
+    "city": "Gauteng",
+    "route": "Pretoria cdb \u2013 Soshaguve xx town",
+    "screens": 1,
+    "lat": -25.6475213,
+    "lng": 28.1279108
+  },
+  {
+    "id": "Sheet1_18",
+    "name": "BH 98 DJ ZN-TAXI 49",
+    "rank": "City of tswane",
+    "city": "Gauteng",
+    "route": "Pretoria cdb \u2013 Mabopane",
+    "screens": 1,
+    "lat": -25.6475213,
+    "lng": 28.1279108
+  },
+  {
+    "id": "Sheet1_19",
+    "name": "BD 91 LK ZN-TAXI 52",
+    "rank": "City of tswane",
+    "city": "Gauteng",
+    "route": "Bosman CBD rank \u2013 Ivory Park",
+    "screens": 1,
+    "lat": -25.6475213,
+    "lng": 28.1279108
+  },
+  {
+    "id": "Sheet1_20",
+    "name": "RANDBURG",
+    "rank": "nan",
+    "city": "nan",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -26.0915852,
+    "lng": 28.0020276
+  },
+  {
+    "id": "Sheet1_21",
+    "name": "LB 15 YN GP- Taxi 14",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -26.1885594,
+    "lng": 28.0430197
+  },
+  {
+    "id": "Sheet1_22",
+    "name": "KB 52 HL GP- Taxi 15",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -26.0213,
+    "lng": 27.929
+  },
+  {
+    "id": "Sheet1_23",
+    "name": "HJ 54 WH GP- Taxi 16",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -26.0255,
+    "lng": 28.004
+  },
+  {
+    "id": "Sheet1_24",
+    "name": "LB 15 YW GP- Taxi 17",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -26.0255,
+    "lng": 28.004
+  },
+  {
+    "id": "Sheet1_25",
+    "name": "LB 15 YD GP- Taxi 18",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -26.20132,
+    "lng": 28.035591
+  },
+  {
+    "id": "Sheet1_26",
+    "name": "HM 63 MF GP- Taxi 19",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -25.9424,
+    "lng": 28.0201
+  },
+  {
+    "id": "Sheet1_27",
+    "name": "KB 52 JB GP- Taxi 20",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -26.0792,
+    "lng": 27.9256
+  },
+  {
+    "id": "Sheet1_28",
+    "name": "KB 52 HW GP- Taxi 21",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -26.2041,
+    "lng": 28.0473
+  },
+  {
+    "id": "Sheet1_29",
+    "name": "HM 63 LW GP- Taxi 22",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -26.0792,
+    "lng": 27.9256
+  },
+  {
+    "id": "Sheet1_30",
+    "name": "KB 52 HD GP- Taxi 23",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -26.2041,
+    "lng": 28.0473
+  },
+  {
+    "id": "Sheet1_31",
+    "name": "KH 62 FY GP- Taxi 24",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -25.9424,
+    "lng": 28.0201
+  },
+  {
+    "id": "Sheet1_32",
+    "name": "HM 63 LD GP- Taxi 25",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -25.9424,
+    "lng": 28.0201
+  },
+  {
+    "id": "Sheet1_33",
+    "name": "KM 27 HS GP- Taxi  3",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -26.2041,
+    "lng": 28.0473
+  },
+  {
+    "id": "Sheet1_34",
+    "name": "LB 16 BL GP- Taxi 10",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -26.2041,
+    "lng": 28.0473
+  },
+  {
+    "id": "Sheet1_35",
+    "name": "HX 26 DF GP- Taxi 28",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -25.9424,
+    "lng": 28.0201
+  },
+  {
+    "id": "Sheet1_36",
+    "name": "EASTERN CAPE",
+    "rank": "nan",
+    "city": "nan",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -32.2171831,
+    "lng": 26.6386401
+  },
+  {
+    "id": "Sheet1_37",
+    "name": "KJY 790 EC -Taxi 60",
+    "rank": "King sebata dalindyebo(Mthata)",
+    "city": "Eastern Cape",
+    "route": "Mthata Cbd \u2013 Mthata Cbd",
+    "screens": 1,
+    "lat": -31.5882,
+    "lng": 28.7844
+  },
+  {
+    "id": "Sheet1_38",
+    "name": "FFC 491 EC- Taxi 77",
+    "rank": "King sebata dalindyebo(Mthata)",
+    "city": "Eastern Cape",
+    "route": "Mthata Cbd \u2013 Corana Sub trank",
+    "screens": 1,
+    "lat": -31.589075,
+    "lng": 28.789145
+  },
+  {
+    "id": "Sheet1_39",
+    "name": "FGY 255 EC-Taxi 102",
+    "rank": "King sebata dalindyebo(Mthata)",
+    "city": "Eastern Cape",
+    "route": "Mthata Cbd \u2013 Mhlakulo",
+    "screens": 1,
+    "lat": -31.589075,
+    "lng": 28.789145
+  },
+  {
+    "id": "Sheet1_40",
+    "name": "415 HLD EC-Taxi 82",
+    "rank": "King sebata dalindyebo(Mthata)",
+    "city": "Eastern Cape",
+    "route": "Mthata Cbd \u2013 Ngagelizwe",
+    "screens": 1,
+    "lat": -31.589075,
+    "lng": 28.789145
+  },
+  {
+    "id": "Sheet1_41",
+    "name": "KBB 261 EC-Taxi 63",
+    "rank": "King sebata dalindyebo(Mthata)",
+    "city": "Eastern Cape",
+    "route": "Mthata Cbd \u2013 Ngagelizwe",
+    "screens": 1,
+    "lat": -31.589075,
+    "lng": 28.789145
+  },
+  {
+    "id": "Sheet1_42",
+    "name": "JSF 178 EC -Taxi 66",
+    "rank": "King sebata dalindyebo(Mthata)",
+    "city": "Eastern Cape",
+    "route": "Mthata Cbd \u2013 Libode",
+    "screens": 1,
+    "lat": -31.589075,
+    "lng": 28.789145
+  },
+  {
+    "id": "Sheet1_43",
+    "name": "JPG 131 EC-Taxi 69",
+    "rank": "King sebata dalindyebo(Mthata)",
+    "city": "Eastern Cape",
+    "route": "Mthata Cbd \u2013 Qweqwe",
+    "screens": 1,
+    "lat": -31.589075,
+    "lng": 28.789145
+  },
+  {
+    "id": "Sheet1_44",
+    "name": "KKV 476 EC-Taxi 68",
+    "rank": "King sebata dalindyebo(Mthata)",
+    "city": "Eastern Cape",
+    "route": "Mthata Cbd \u2013 Port st Johns",
+    "screens": 1,
+    "lat": -31.589075,
+    "lng": 28.789145
+  },
+  {
+    "id": "Sheet1_45",
+    "name": "FCP 185 EC- Taxi 61",
+    "rank": "King sebata dalindyebo(Mthata)",
+    "city": "Eastern Cape",
+    "route": "Mthata Cbd \u2013 Kwezi",
+    "screens": 1,
+    "lat": -31.589075,
+    "lng": 28.789145
+  },
+  {
+    "id": "Sheet1_46",
+    "name": "JRH 342 EC- Taxi 65",
+    "rank": "King sebata dalindyebo(Mthata)",
+    "city": "Eastern Cape",
+    "route": "Mthata Cbd \u2013 Mamela sub rank",
+    "screens": 1,
+    "lat": -31.589075,
+    "lng": 28.789145
+  },
+  {
+    "id": "Sheet1_47",
+    "name": "JMC 272 EC-Taxi 58",
+    "rank": "King sebata dalindyebo(Mthata)",
+    "city": "Eastern Cape",
+    "route": "Mthata Cbd \u2013 Mthata Cbd",
+    "screens": 1,
+    "lat": -31.589075,
+    "lng": 28.789145
+  },
+  {
+    "id": "Sheet1_48",
+    "name": "JRT 371 EC- Taxi 97",
+    "rank": "King sebata dalindyebo(Mthata)",
+    "city": "Eastern Cape",
+    "route": "Mthata Cbd \u2013 Corana sub rank",
+    "screens": 1,
+    "lat": -31.589075,
+    "lng": 28.789145
+  },
+  {
+    "id": "Sheet1_49",
+    "name": "HSK 064 EC- Taxi 74",
+    "rank": "King sebata dalindyebo(Mthata)",
+    "city": "Eastern Cape",
+    "route": "Mthata Cbd \u2013 Mthata Cbd",
+    "screens": 1,
+    "lat": -31.589075,
+    "lng": 28.789145
+  },
+  {
+    "id": "Sheet1_50",
+    "name": "JNC 981 EC- Taxi 71",
+    "rank": "King sebata dalindyebo(Mthata)",
+    "city": "Eastern Cape",
+    "route": "Mthata Cbd \u2013 Corana sub rank",
+    "screens": 1,
+    "lat": -31.589075,
+    "lng": 28.789145
+  },
+  {
+    "id": "Sheet1_51",
+    "name": "Soweto",
+    "rank": "nan",
+    "city": "nan",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -26.2227778,
+    "lng": 27.89
+  },
+  {
+    "id": "Sheet1_52",
+    "name": "LC 07 KT GP-TAXI 55",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "Zola (Soweto) \u2013 Carlton Centre (Johannesburg Cbd)",
+    "screens": 1,
+    "lat": -26.1885594,
+    "lng": 28.0430197
+  },
+  {
+    "id": "Sheet1_53",
+    "name": "JB 76 ZP GP-TAXI 62",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "Greenvillage Doornkop(Soweto) \u2013 Jeppe ( Johannesburg )",
+    "screens": 1,
+    "lat": -26.1885594,
+    "lng": 28.0430197
+  },
+  {
+    "id": "Sheet1_54",
+    "name": "LD 12 ZN GP-TAXI 86",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "Zola (Soweto) \u2013 Bara ( Soweto)",
+    "screens": 1,
+    "lat": -26.1885594,
+    "lng": 28.0430197
+  },
+  {
+    "id": "Sheet1_55",
+    "name": "HY 47 WX GP- TAXI 50",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "Zola (Soweto) \u2013 Carlton Centre (Johannesburg Cbd)",
+    "screens": 1,
+    "lat": -26.1885594,
+    "lng": 28.0430197
+  },
+  {
+    "id": "Sheet1_56",
+    "name": "HL 48 SH GP -TAXI 53",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "Greenvillage Doornkop(Soweto) \u2013 Doornfontein (Johannesburg Cbd)",
+    "screens": 1,
+    "lat": -26.1885594,
+    "lng": 28.0430197
+  },
+  {
+    "id": "Sheet1_57",
+    "name": "BM 62 RZ GP-TAXI 93",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "Zola (Soweto) \u2013 Jeppe ( Johannesburg )",
+    "screens": 1,
+    "lat": -26.1885594,
+    "lng": 28.0430197
+  },
+  {
+    "id": "Sheet1_58",
+    "name": "JR 68 FX GP-TAXI 103",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "Zola (Soweto) \u2013 Jeppe ( Johannesburg )",
+    "screens": 1,
+    "lat": -26.1885594,
+    "lng": 28.0430197
+  },
+  {
+    "id": "Sheet1_59",
+    "name": "HW 43 TK GP -TAXI 76",
+    "rank": "City of Johannesburg",
+    "city": "Gauteng",
+    "route": "Zola (Soweto) \u2013 Bara ( Soweto)",
+    "screens": 1,
+    "lat": -26.1885594,
+    "lng": 28.0430197
+  },
+  {
+    "id": "Sheet1_60",
+    "name": "Pretoria",
+    "rank": "nan",
+    "city": "nan",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -25.7459277,
+    "lng": 28.1879101
+  },
+  {
+    "id": "Sheet1_61",
+    "name": "105 LDN GP -TAXI 88",
+    "rank": "City of tswane",
+    "city": "Gauteng",
+    "route": "Bosman CBD rank \u2013 Atteridgeville",
+    "screens": 1,
+    "lat": -25.6475213,
+    "lng": 28.1279108
+  },
+  {
+    "id": "Sheet1_62",
+    "name": "KX 16 TZ GP -TAXI 79",
+    "rank": "City of tswane",
+    "city": "Gauteng",
+    "route": "Bosman CBD rank \u2013 Boksburg",
+    "screens": 1,
+    "lat": -25.6475213,
+    "lng": 28.1279108
+  },
+  {
+    "id": "Sheet1_63",
+    "name": "HB 63  SZ GP- TAXI 75",
+    "rank": "City of tswane",
+    "city": "Gauteng",
+    "route": "Pretoria cdb \u2013 Soshaguve xx town",
+    "screens": 1,
+    "lat": -25.6475213,
+    "lng": 28.1279108
+  },
+  {
+    "id": "Sheet1_64",
+    "name": "KX 03 BC GP-TAXI 56",
+    "rank": "City of tswane",
+    "city": "Gauteng",
+    "route": "Pretoria cdb \u2013 Mabopane",
+    "screens": 1,
+    "lat": -25.6475213,
+    "lng": 28.1279108
+  },
+  {
+    "id": "Sheet1_65",
+    "name": "MN 74 GX GP-TAXI 73",
+    "rank": "City of tswane",
+    "city": "Gauteng",
+    "route": "Bosman CBD rank \u2013 Ivory Park",
+    "screens": 1,
+    "lat": -25.6475213,
+    "lng": 28.1279108
+  },
+  {
+    "id": "Sheet1_66",
+    "name": "LF 66 YT GP-TAXI 89",
+    "rank": "City of tswane",
+    "city": "Gauteng",
+    "route": "Bosman CBD rank \u2013 Ivory Park",
+    "screens": 1,
+    "lat": -25.6475213,
+    "lng": 28.1279108
+  },
+  {
+    "id": "Sheet1_67",
+    "name": "LV 96 SD GP-TAXI 106",
+    "rank": "City of tswane",
+    "city": "Gauteng",
+    "route": "Bosman CBD rank \u2013 Bushbuckridge",
+    "screens": 1,
+    "lat": -25.6475213,
+    "lng": 28.1279108
+  },
+  {
+    "id": "Sheet1_68",
+    "name": "LW 67 JW GP-TAXI 100",
+    "rank": "City of tswane",
+    "city": "Gauteng",
+    "route": "Bosman CBD rank \u2013 Springs",
+    "screens": 1,
+    "lat": -25.6475213,
+    "lng": 28.1279108
+  },
+  {
+    "id": "Sheet1_69",
+    "name": "MN 74 HG GP-TAXI 91",
+    "rank": "City of tswane",
+    "city": "Gauteng",
+    "route": "Bosman CBD rank \u2013 Randfontein amd Tzaneen",
+    "screens": 1,
+    "lat": -25.6475213,
+    "lng": 28.1279108
+  },
+  {
+    "id": "Sheet1_70",
+    "name": "Limpopo",
+    "rank": "nan",
+    "city": "nan",
+    "route": "nan \u2013 nan",
+    "screens": 1,
+    "lat": -23.4735288,
+    "lng": 29.3959199
+  },
+  {
+    "id": "Sheet1_71",
+    "name": "FX 542 L-TAXI 96",
+    "rank": "Capricon District",
+    "city": "Limpopo",
+    "route": "Seshego Cbd \u2013 Mall of the North",
+    "screens": 1,
+    "lat": -23.542711,
+    "lng": 29.4756867
+  },
+  {
+    "id": "Sheet1_72",
+    "name": "DZY 617 L-TAXI 90",
+    "rank": "Capricon District",
+    "city": "Limpopo",
+    "route": "Seshego Cbd \u2013 Polokwane Cbd",
+    "screens": 1,
+    "lat": -23.542711,
+    "lng": 29.4756867
+  },
+  {
+    "id": "Sheet1_73",
+    "name": "CZB 053 L-TAXI 95",
+    "rank": "Capricon District",
+    "city": "Limpopo",
+    "route": "Seshego Cbd \u2013 Mall of the North",
+    "screens": 1,
+    "lat": -23.542711,
+    "lng": 29.4756867
+  },
+  {
+    "id": "Sheet1_74",
+    "name": "FTN 680 L-TAXI 54",
+    "rank": "Capricon District",
+    "city": "Limpopo",
+    "route": "Seshego Cbd \u2013 Polokwane Cbd",
+    "screens": 1,
+    "lat": -23.542711,
+    "lng": 29.4756867
+  },
+  {
+    "id": "Sheet1_75",
+    "name": "DZX 754 L- TAXI 57",
+    "rank": "Capricon District",
+    "city": "Limpopo",
+    "route": "Seshego Cbd \u2013 Mall of the North",
+    "screens": 1,
+    "lat": -23.542711,
+    "lng": 29.4756867
+  },
+  {
+    "id": "Sheet1_76",
+    "name": "HGS 916 L-TAXI 87",
+    "rank": "Capricon District",
+    "city": "Limpopo",
+    "route": "Seshego Cbd \u2013 Polokwane Cbd",
+    "screens": 1,
+    "lat": -23.542711,
+    "lng": 29.4756867
+  },
+  {
+    "id": "Sheet1_77",
+    "name": "002 LDN L-TAXI 83",
+    "rank": "Capricon District",
+    "city": "Limpopo",
+    "route": "Zebediela(Mathibela rank) \u2013 Lebowakgomo",
+    "screens": 1,
+    "lat": -23.542711,
+    "lng": 29.4756867
+  },
+  {
+    "id": "Sheet1_78",
+    "name": "DSJ 651 L-TAXI 84",
+    "rank": "Tzaneen",
+    "city": "Limpopo",
+    "route": "Tzaneen Cbd \u2013 Turfloop University",
+    "screens": 1,
+    "lat": -23.8319444,
+    "lng": 30.1611111
+  }
+]

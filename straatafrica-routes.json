@@ -1,0 +1,50 @@
+[
+  {
+    "id": "route_54",
+    "startName": "Zola (Soweto)",
+    "endName": "Bara ( Soweto)",
+    "district": "City of Johannesburg",
+    "state": "Gauteng",
+    "loadsPerDay": "",
+    "startLat": -26.2422222,
+    "startLng": 27.8363889,
+    "endLat": -26.2565145,
+    "endLng": 27.9566759
+  },
+  {
+    "id": "route_57",
+    "startName": "Zola (Soweto)",
+    "endName": "Jeppe ( Johannesburg )",
+    "district": "City of Johannesburg",
+    "state": "Gauteng",
+    "loadsPerDay": "",
+    "startLat": -26.2422222,
+    "startLng": 27.8363889,
+    "endLat": -26.2047315,
+    "endLng": 28.0642664
+  },
+  {
+    "id": "route_58",
+    "startName": "Zola (Soweto)",
+    "endName": "Jeppe ( Johannesburg )",
+    "district": "City of Johannesburg",
+    "state": "Gauteng",
+    "loadsPerDay": "",
+    "startLat": -26.2422222,
+    "startLng": 27.8363889,
+    "endLat": -26.2047315,
+    "endLng": 28.0642664
+  },
+  {
+    "id": "route_59",
+    "startName": "Zola (Soweto)",
+    "endName": "Bara ( Soweto)",
+    "district": "City of Johannesburg",
+    "state": "Gauteng",
+    "loadsPerDay": "",
+    "startLat": -26.2422222,
+    "startLng": 27.8363889,
+    "endLat": -26.2565145,
+    "endLng": 27.9566759
+  }
+]
