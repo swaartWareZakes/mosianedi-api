@@ -1,11 +1,10 @@
-# app/routers/projects.py
-
 from fastapi import APIRouter, HTTPException, Depends, Header
 from decimal import Decimal
 import os
 import psycopg2
 from contextlib import contextmanager
 from jose import jwt, JWTError
+from uuid import UUID  # <--- THIS WAS MISSING
 
 from app.db.schemas import ProjectMetadata, ProjectDB 
 
@@ -67,6 +66,33 @@ async def create_project(metadata: ProjectMetadata, user_id: str = Depends(get_c
         "message": "Project created",
         "created_at": created_at.isoformat(),
     }
+    
+@router.get(
+    "/{project_id}",
+    response_model=ProjectDB,
+    summary="Get details of a specific project",
+)
+def get_project(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+):
+    sql = """
+        SELECT * FROM public.projects
+        WHERE id = %s AND user_id = %s;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), user_id))
+            row = cur.fetchone()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Project not found")
+                
+            # Convert row to dict
+            cols = [desc[0] for desc in cur.description]
+            return dict(zip(cols, row))
+        
+        
 
 @router.get("/", response_model=list[ProjectDB])
 async def list_projects(user_id: str = Depends(get_current_user_id)):
