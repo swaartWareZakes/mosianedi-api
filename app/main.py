@@ -22,8 +22,9 @@ from app.routers import projects
 from app.master_data import router as master_data_router
 from app.network_snapshot import router as network_snapshot_router
 from app.scenarios import router as scenarios_router
+from app.computation import router as computation_router
 # Only include this if the dashboards module exists to avoid startup errors
-# from app.dashboards import router as dashboards_router 
+from app.dashboards import router as dashboards_router 
 
 # -------------------------------------------------------------------
 # FastAPI APP CONFIG
@@ -73,12 +74,18 @@ app.include_router(
     tags=["Scenarios"]
 )
 
+
+app.include_router(
+    computation_router,
+    prefix="/api/v1/projects",
+    tags=["Computation"]
+)
 # Uncomment when the dashboards module is ready
-# app.include_router(
-#     dashboards_router, 
-#     prefix="/api/v1/projects", 
-#     tags=["Dashboards"]
-# )
+app.include_router(
+    dashboards_router, 
+    prefix="/api/v1/projects", 
+    tags=["Dashboards"]
+)
 
 # -------------------------------------------------------------------
 # ROOT PING / HEALTHCHECK
