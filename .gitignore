@@ -3,3 +3,11 @@ __pycache__/
 .env
 *.pyc
 .DS_Store
+fastapi_snapshot.txt
+generate_network_json.py
+generate_routes_json.py
+geocode_missing_points.py
+network_inventory_geocoded.xlsx
+network_inventory.xlsx
+straatafrica-network.json
+straatafrica-routes.json
