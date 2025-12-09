@@ -16,14 +16,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Routers
+# NOTE: Ensure each module's __init__.py exposes 'router' 
+# or change imports to: from app.master_data.router import router as ...
 from app.routers import projects
 from app.master_data import router as master_data_router
 from app.network_snapshot import router as network_snapshot_router
 from app.scenarios import router as scenarios_router
-from app.dashboards import router as dashboards_router
-
-
-
+# Only include this if the dashboards module exists to avoid startup errors
+# from app.dashboards import router as dashboards_router 
 
 # -------------------------------------------------------------------
 # FastAPI APP CONFIG
@@ -64,19 +64,21 @@ app.include_router(
 app.include_router(
     network_snapshot_router, 
     prefix="/api/v1/projects", 
-    tags=["Network"])
-
+    tags=["Network"]
+)
 
 app.include_router(
     scenarios_router, 
     prefix="/api/v1/projects", 
-    tags=["Scenarios"])
-
-app.include_router(
-    dashboards_router, 
-    prefix="/api/v1/projects", 
-    tags=["Dashboards"]
+    tags=["Scenarios"]
 )
+
+# Uncomment when the dashboards module is ready
+# app.include_router(
+#     dashboards_router, 
+#     prefix="/api/v1/projects", 
+#     tags=["Dashboards"]
+# )
 
 # -------------------------------------------------------------------
 # ROOT PING / HEALTHCHECK
