@@ -1,4 +1,145 @@
---- ./routers/__init__.py ---
+--- ./routers/provincial_stats.py ---
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
+from pydantic import BaseModel
+from typing import List, Optional
+from uuid import UUID
+import pandas as pd
+import io
+from app.routers.projects import get_db_connection, get_current_user_id
+
+router = APIRouter()
+
+# --- SCHEMAS --------------------------------------------------------
+class ProvincialStatUpdate(BaseModel):
+    province_name: str
+    km_arid: Optional[float] = 0
+    km_semi_arid: Optional[float] = 0
+    km_dry_sub_humid: Optional[float] = 0
+    km_moist_sub_humid: Optional[float] = 0
+    km_humid: Optional[float] = 0
+    avg_vci: Optional[float] = 0
+    vehicle_km: Optional[float] = 0
+    fuel_sales: Optional[float] = 0
+
+class ProvincialStatResponse(ProvincialStatUpdate):
+    id: UUID
+    project_id: UUID
+
+# --- ENDPOINTS ------------------------------------------------------
+
+@router.get("/{project_id}", response_model=List[ProvincialStatResponse])
+def get_stats(project_id: UUID, user_id: str = Depends(get_current_user_id)):
+    """
+    Returns the 9 rows. They are guaranteed to exist because of the SQL trigger.
+    """
+    sql = """
+        SELECT * FROM public.provincial_stats
+        WHERE project_id = %s
+        ORDER BY province_name ASC;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id),))
+            rows = cur.fetchall()
+            cols = [desc[0] for desc in cur.description]
+            return [dict(zip(cols, row)) for row in rows]
+
+@router.post("/{project_id}", status_code=200)
+def save_manual_input(
+    project_id: UUID, 
+    stats: List[ProvincialStatUpdate], 
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    Saves user edits from the grid.
+    Uses 'UPDATE' because the rows already exist.
+    """
+    sql = """
+        UPDATE public.provincial_stats
+        SET 
+            km_arid = %s, km_semi_arid = %s, km_dry_sub_humid = %s, 
+            km_moist_sub_humid = %s, km_humid = %s,
+            avg_vci = %s, vehicle_km = %s, fuel_sales = %s,
+            updated_at = NOW()
+        WHERE project_id = %s AND province_name = %s;
+    """
+    
+    values = []
+    for s in stats:
+        values.append((
+            s.km_arid, s.km_semi_arid, s.km_dry_sub_humid, 
+            s.km_moist_sub_humid, s.km_humid,
+            s.avg_vci, s.vehicle_km, s.fuel_sales,
+            str(project_id), s.province_name
+        ))
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Execute batch update
+            cur.executemany(sql, values)
+            conn.commit()
+            
+    return {"message": "Saved successfully"}
+
+@router.post("/{project_id}/upload")
+def upload_stats_csv(
+    project_id: UUID, 
+    file: UploadFile = File(...), 
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    Parses 'Book1.csv' and updates the existing 9 rows.
+    """
+    try:
+        contents = file.file.read()
+        if file.filename.endswith('.csv'):
+            df = pd.read_csv(io.BytesIO(contents), header=None)
+        else:
+            df = pd.read_excel(io.BytesIO(contents), header=None)
+
+        # Basic Cleanup tailored to your CSV structure
+        df = df.iloc[3:] # Skip headers
+        df = df[df[0].notna()] # Remove empty lines
+        
+        updates = []
+        for _, row in df.iterrows():
+            prov_name = str(row[0]).strip()
+            # Skip totals/junk
+            if "Total" in prov_name or "Province" in prov_name:
+                continue
+
+            def parse(val):
+                if isinstance(val, (int, float)): return val
+                if isinstance(val, str):
+                    clean = val.replace('R','').replace(',','').replace(' ','').replace('%','')
+                    try: return float(clean)
+                    except: return 0
+                return 0
+
+            # Map CSV Columns to DB Columns
+            updates.append((
+                parse(row[1]), parse(row[2]), parse(row[3]), parse(row[4]), parse(row[5]), # Climate Kms
+                parse(row[7]), parse(row[8]), parse(row[10]), # VCI, VehKm, Fuel
+                str(project_id), prov_name # WHERE clause
+            ))
+
+        sql = """
+            UPDATE public.provincial_stats
+            SET 
+                km_arid=%s, km_semi_arid=%s, km_dry_sub_humid=%s, km_moist_sub_humid=%s, km_humid=%s,
+                avg_vci=%s, vehicle_km=%s, fuel_sales=%s, updated_at=NOW()
+            WHERE project_id=%s AND province_name=%s;
+        """
+
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(sql, updates)
+                conn.commit()
+
+        return {"message": "Spreadsheet data imported"}
+
+    except Exception as e:
+        raise HTTPException(400, f"Upload Error: {str(e)}")--- ./routers/__init__.py ---
 --- ./routers/master_data.py ---
 """
 Master Data Upload, Validation, History & Preview Endpoints
@@ -256,14 +397,13 @@ async def get_master_data_preview(
     except Exception as e:
         print("[PREVIEW] Pandas error:", e)
         raise HTTPException(500, f"Error processing preview: {str(e)}")--- ./routers/projects.py ---
-# app/routers/projects.py
-
 from fastapi import APIRouter, HTTPException, Depends, Header
 from decimal import Decimal
 import os
 import psycopg2
 from contextlib import contextmanager
 from jose import jwt, JWTError
+from uuid import UUID  # <--- THIS WAS MISSING
 
 from app.db.schemas import ProjectMetadata, ProjectDB 
 
@@ -325,6 +465,33 @@ async def create_project(metadata: ProjectMetadata, user_id: str = Depends(get_c
         "message": "Project created",
         "created_at": created_at.isoformat(),
     }
+    
+@router.get(
+    "/{project_id}",
+    response_model=ProjectDB,
+    summary="Get details of a specific project",
+)
+def get_project(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+):
+    sql = """
+        SELECT * FROM public.projects
+        WHERE id = %s AND user_id = %s;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), user_id))
+            row = cur.fetchone()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Project not found")
+                
+            # Convert row to dict
+            cols = [desc[0] for desc in cur.description]
+            return dict(zip(cols, row))
+        
+        
 
 @router.get("/", response_model=list[ProjectDB])
 async def list_projects(user_id: str = Depends(get_current_user_id)):
@@ -867,7 +1034,353 @@ def read_network_snapshot(
     breakdown by class and surface) computed from the latest
     master data upload for this project & user.
     """
-    return get_network_snapshot(project_id=project_id, user_id=user_id)--- ./dashboards/service.py ---
+    return get_network_snapshot(project_id=project_id, user_id=user_id)--- ./computation/__init__.py ---
+# app/computation/__init__.py
+from .router import router  # so main.py can `from app.computation import router`
+
+__all__ = ["router"]--- ./computation/engine.py ---
+# app/computation/engine.py
+
+import pandas as pd
+import numpy as np
+from uuid import UUID
+from app.scenarios.schemas import RonetParameters
+from .schemas import SimulationOutput, YearlyResult
+
+def run_ronet_simulation(
+    project_id: UUID,
+    scenario_id: UUID,
+    segments_df: pd.DataFrame,
+    costs_df: pd.DataFrame,
+    iri_defaults_df: pd.DataFrame,
+    params: RonetParameters
+) -> SimulationOutput:
+    
+    # --- 1. PREPARE LOOKUPS ---
+    # Convert CSV data into easy-to-use dictionaries
+    
+    # Thresholds: (Road Class, Surface) -> { good_max, poor_min }
+    threshold_map = {} 
+    if not iri_defaults_df.empty:
+        for _, row in iri_defaults_df.iterrows():
+            # Safely handle string conversion and casing
+            r_class = str(row.get('road_class', '')).strip().lower()
+            s_type = str(row.get('surface_type', '')).strip().lower()
+            key = (r_class, s_type)
+            
+            threshold_map[key] = {
+                'good': float(row.get('iri_good_max', 2.5)),
+                'poor': float(row.get('iri_poor_min', 6.0))
+            }
+
+    # Costs: (Treatment, Surface) -> { cost, reset_iri }
+    cost_map = {}
+    if not costs_df.empty:
+        for _, row in costs_df.iterrows():
+            t_type = str(row.get('treatment', '')).strip().lower()
+            s_type = str(row.get('surface_type', '')).strip().lower()
+            cost_map[(t_type, s_type)] = {
+                'cost': float(row.get('cost_per_km', 0)),
+                'reset_iri': float(row.get('reset_to_iri', 2.0))
+            }
+
+    # --- 2. INITIALIZE NETWORK STATE ---
+    # Work on a copy so we don't mutate original data
+    current_segments = segments_df.copy()
+    
+    # Ensure numeric types and handle missing values
+    current_segments['iri'] = pd.to_numeric(current_segments['iri'], errors='coerce').fillna(4.0)
+    current_segments['length_km'] = pd.to_numeric(current_segments['length_km'], errors='coerce').fillna(1.0)
+    current_segments['aadt'] = pd.to_numeric(current_segments.get('aadt', 0), errors='coerce').fillna(0)
+
+    yearly_results = []
+    
+    # Deterioration Rates (Simplified for Prototype)
+    DETERIORATION_PAVED = 0.12
+    DETERIORATION_GRAVEL = 0.25
+
+    # --- 3. SIMULATION LOOP (YEAR BY YEAR) ---
+    # Loop exactly the number of years specified by the slider
+    for year in range(1, params.analysis_duration + 1):
+        
+        year_total_cost_needed = 0
+        year_total_cost_spent = 0
+        
+        # Track potential interventions
+        interventions = [] # List of dicts
+
+        # --- A. DETERMINE NEEDS (Unconstrained) ---
+        for idx, seg in current_segments.iterrows():
+            r_class = str(seg.get('road_class', '')).strip().lower()
+            s_type = str(seg.get('surface_type', '')).strip().lower()
+            iri = seg['iri']
+            length = seg['length_km']
+            
+            # Get Thresholds (Default to 3.0/6.0 if not found)
+            limits = threshold_map.get((r_class, s_type), {'good': 3.0, 'poor': 6.0})
+            
+            # 1. Deteriorate (Roads get older/rougher)
+            det_rate = DETERIORATION_GRAVEL if 'gravel' in s_type else DETERIORATION_PAVED
+            iri += det_rate
+            
+            # 2. Decision Logic (Based on Policy Bias)
+            treatment_needed = None
+            
+            if params.policy_bias == "preventive":
+                # Fix as soon as it leaves "Good" condition
+                if iri > limits['good']: 
+                    treatment_needed = "periodic reseal" if 'paved' in s_type else "regravelling"
+            
+            elif params.policy_bias == "reactive":
+                # Fix only when it reaches "Poor" condition
+                if iri > limits['poor']: 
+                    treatment_needed = "rehabilitation" if 'paved' in s_type else "regravelling"
+            
+            else: # "balanced"
+                if iri > limits['poor']:
+                    treatment_needed = "rehabilitation" if 'paved' in s_type else "regravelling"
+                elif iri > limits['good']:
+                    # Only do lighter fix if we are strictly in Fair (and not Poor)
+                    treatment_needed = "periodic reseal" if 'paved' in s_type else "blading"
+
+            # 3. Calculate Cost if treatment is needed
+            if treatment_needed:
+                cost_info = cost_map.get((treatment_needed, s_type))
+                
+                # Fallback costs if CSV lookup fails
+                if not cost_info:
+                    if "reseal" in treatment_needed: cost_info = {'cost': 900000, 'reset_iri': 2.2}
+                    elif "rehab" in treatment_needed: cost_info = {'cost': 3500000, 'reset_iri': 1.5}
+                    elif "regravel" in treatment_needed: cost_info = {'cost': 600000, 'reset_iri': 4.0}
+                    else: cost_info = {'cost': 50000, 'reset_iri': iri - 0.5}
+
+                cost = cost_info['cost'] * length
+                reset_iri = cost_info['reset_iri']
+                
+                year_total_cost_needed += cost
+                interventions.append({
+                    'idx': idx,
+                    'cost': cost,
+                    'reset_iri': reset_iri,
+                    'current_iri': iri
+                })
+            
+            # Temporarily save deteriorated state (will be overwritten if fixed)
+            current_segments.at[idx, 'iri'] = iri
+
+        # --- B. APPLY BUDGET CONSTRAINT ---
+        # 100% means we spend exactly what is needed. <100% means we cut projects.
+        budget_factor = params.budget_percent_baseline / 100.0
+        available_budget = year_total_cost_needed * budget_factor
+        
+        # Sort interventions by AADT (High traffic gets priority funding)
+        interventions.sort(key=lambda x: current_segments.at[x['idx'], 'aadt'], reverse=True)
+        
+        for action in interventions:
+            if available_budget >= action['cost']:
+                # Fund the project
+                available_budget -= action['cost']
+                year_total_cost_spent += action['cost']
+                # Apply improvement (reset IRI)
+                current_segments.at[action['idx'], 'iri'] = action['reset_iri']
+            else:
+                # No budget -> Road stays deteriorated
+                pass
+
+        # --- C. CALCULATE YEARLY STATS ---
+        total_len = current_segments['length_km'].sum()
+        if total_len == 0: total_len = 1 # Avoid division by zero
+        
+        # Weighted Average IRI
+        avg_iri = (current_segments['iri'] * current_segments['length_km']).sum() / total_len
+        
+        # Calculate Condition Buckets
+        good_km, fair_km, poor_km = 0, 0, 0
+        
+        for _, seg in current_segments.iterrows():
+            r_class = str(seg.get('road_class', '')).strip().lower()
+            s_type = str(seg.get('surface_type', '')).strip().lower()
+            limits = threshold_map.get((r_class, s_type), {'good': 3.0, 'poor': 6.0})
+            
+            if seg['iri'] <= limits['good']: good_km += seg['length_km']
+            elif seg['iri'] <= limits['poor']: fair_km += seg['length_km']
+            else: poor_km += seg['length_km']
+
+        yearly_results.append(YearlyResult(
+            year=year,
+            avg_condition_index=round(avg_iri, 2),
+            pct_good=round((good_km / total_len) * 100, 1),
+            pct_fair=round((fair_km / total_len) * 100, 1),
+            pct_poor=round((poor_km / total_len) * 100, 1),
+            total_maintenance_cost=round(year_total_cost_spent, 2),
+            asset_value=0 # Placeholder for advanced asset value logic
+        ))
+
+    return SimulationOutput(
+        project_id=str(project_id),
+        scenario_id=str(scenario_id),
+        year_count=params.analysis_duration,
+        yearly_data=yearly_results,
+        total_cost_npv=sum(y.total_maintenance_cost for y in yearly_results),
+        final_network_condition=yearly_results[-1].avg_condition_index
+    )--- ./computation/schemas.py ---
+# app/computation/schemas.py
+
+from typing import List, Dict, Optional
+from pydantic import BaseModel
+
+class YearlyResult(BaseModel):
+    year: int
+    avg_condition_index: float
+    pct_good: float
+    pct_fair: float
+    pct_poor: float
+    total_maintenance_cost: float
+    asset_value: float
+
+class SimulationOutput(BaseModel):
+    project_id: str
+    scenario_id: str
+    year_count: int
+    
+    # Time Series Data (for charts)
+    yearly_data: List[YearlyResult]
+    
+    # Aggregates (for summary cards)
+    total_cost_npv: float
+    final_network_condition: float--- ./computation/router.py ---
+from fastapi import APIRouter, Depends, HTTPException
+from uuid import UUID
+import pandas as pd
+from app.routers.projects import get_current_user_id, get_db_connection
+from app.scenarios import service as scenario_service
+from . import engine, schemas
+
+router = APIRouter()
+
+# --- 👇 THIS WAS MISSING: The Endpoint to fetch results ---
+@router.get(
+    "/{project_id}/simulation/latest",
+    response_model=schemas.SimulationOutput,
+    summary="Get results from the most recent simulation run"
+)
+def get_latest_simulation_result(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id)
+):
+    # Fetch the Baseline Scenario ID first
+    scenario = scenario_service.get_or_create_baseline(project_id, user_id)
+    
+    # Get the result specifically for this scenario
+    sql = """
+        SELECT results_payload
+        FROM public.simulation_results
+        WHERE project_id = %s AND scenario_id = %s
+        LIMIT 1;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), str(scenario.id)))
+            row = cur.fetchone()
+            
+    if not row:
+        raise HTTPException(404, "No simulation results found for this project.")
+        
+    return row[0]
+
+
+# --- Existing Run Logic (Unchanged) ---
+@router.post(
+    "/{project_id}/simulation/run",
+    response_model=schemas.SimulationOutput,
+    summary="Trigger a RONET simulation run"
+)
+def run_simulation(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id)
+):
+    # 1. Fetch Workbook Data (Segments + Lookups)
+    try:
+        sql = """
+            SELECT workbook_payload 
+            FROM public.master_data_uploads
+            WHERE project_id = %s AND user_id = %s
+            ORDER BY created_at DESC LIMIT 1;
+        """
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (str(project_id), user_id))
+                row = cur.fetchone()
+                
+        if not row or not row[0]:
+            raise HTTPException(404, "No master data found. Please upload a workbook first.")
+            
+        payload = row[0]
+        
+        if "segments" not in payload:
+             raise HTTPException(400, "Workbook missing 'segments' sheet.")
+        df_segments = pd.DataFrame(payload["segments"])
+        
+        # Extract Lookups
+        df_costs = pd.DataFrame(payload.get("road_costs", []))
+        df_iri = pd.DataFrame(payload.get("iri_defaults", []))
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Error loading master data: {e}")
+
+    # 2. Fetch Scenario Parameters (The Sliders)
+    # This fetches the 'analysis_duration' you saved in Step 2
+    try:
+        scenario = scenario_service.get_or_create_baseline(project_id, user_id)
+    except Exception as e:
+        raise HTTPException(500, f"Error loading scenario: {e}")
+
+    # 3. Run Engine
+    # The 'params' object contains the exact years set in your UI slider
+    try:
+        result = engine.run_ronet_simulation(
+            project_id=project_id,
+            scenario_id=scenario.id,
+            segments_df=df_segments,
+            costs_df=df_costs,
+            iri_defaults_df=df_iri,
+            params=scenario.parameters 
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"Simulation engine failed: {e}")
+
+    # 4. Save Results to DB (OVERWRITE MODE)
+    # We delete any existing result for this specific scenario first
+    sql_delete = """
+        DELETE FROM public.simulation_results
+        WHERE project_id = %s AND scenario_id = %s;
+    """
+    
+    sql_insert = """
+        INSERT INTO public.simulation_results 
+        (project_id, scenario_id, results_payload, triggered_by)
+        VALUES (%s, %s, %s, %s);
+    """
+    
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Step A: Clear old run
+            cur.execute(sql_delete, (str(project_id), str(scenario.id)))
+            
+            # Step B: Insert new run
+            cur.execute(sql_insert, (
+                str(project_id), 
+                str(scenario.id), 
+                result.model_dump_json(), 
+                user_id
+            ))
+            conn.commit()
+
+    return result--- ./dashboards/service.py ---
 # app/dashboards/service.py
 from typing import List
 from uuid import UUID
@@ -1161,7 +1674,6 @@ def update_dashboard(
 
 from uuid import UUID
 from typing import List
-
 from fastapi import HTTPException
 
 from .schemas import (
@@ -1169,45 +1681,36 @@ from .schemas import (
     ScenarioUpdate,
     ScenarioRead,
     ScenarioSummary,
+    RonetParameters
 )
 from . import repository as repo
 
-
-def create_scenario(
-    project_id: UUID,
-    user_id: str,
-    payload: ScenarioCreate,
-) -> ScenarioRead:
-    data = repo.create_scenario(project_id, user_id, payload.dict())
-    return ScenarioRead(**data)
-
-
-def list_scenarios(
-    project_id: UUID,
-    user_id: str,
-) -> List[ScenarioSummary]:
-    rows = repo.list_scenarios(project_id, user_id)
-    return [
-        ScenarioSummary(
-            id=row["id"],
-            name=row["name"],
-            is_baseline=row["is_baseline"],
-            created_at=row["created_at"],
-        )
-        for row in rows
-    ]
-
-
-def get_scenario(
-    project_id: UUID,
-    scenario_id: UUID,
-    user_id: str,
-) -> ScenarioRead:
-    row = repo.get_scenario(project_id, scenario_id, user_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Scenario not found.")
-    return ScenarioRead(**row)
-
+def get_or_create_baseline(project_id: UUID, user_id: str) -> ScenarioRead:
+    """
+    Fetch the baseline scenario. If none exists, create a default one.
+    This ensures the 'Config' page always has something to load.
+    """
+    row = repo.get_baseline_scenario(project_id, user_id)
+    
+    if row:
+        return ScenarioRead(**row)
+    
+    # Create default baseline if missing
+    # We explicitly initialize default parameters here
+    default_payload = ScenarioCreate(
+        name="Baseline Scenario",
+        description="Default configuration generated by system.",
+        is_baseline=True,
+        parameters=RonetParameters() 
+    )
+    
+    # Create it
+    new_row = repo.create_scenario(
+        project_id, 
+        user_id, 
+        default_payload.model_dump()
+    )
+    return ScenarioRead(**new_row)
 
 def update_scenario(
     project_id: UUID,
@@ -1215,20 +1718,23 @@ def update_scenario(
     user_id: str,
     payload: ScenarioUpdate,
 ) -> ScenarioRead:
-    row = repo.update_scenario(project_id, scenario_id, user_id, payload.dict(exclude_unset=True))
+    # Exclude unset to allow partial updates (PATCH behavior)
+    data = payload.model_dump(exclude_unset=True)
+    
+    row = repo.update_scenario(project_id, scenario_id, user_id, data)
     if not row:
         raise HTTPException(status_code=404, detail="Scenario not found.")
     return ScenarioRead(**row)
 
+def list_scenarios(project_id: UUID, user_id: str) -> List[ScenarioSummary]:
+    rows = repo.list_scenarios(project_id, user_id)
+    return [ScenarioSummary(**row) for row in rows]
 
-def delete_scenario(
-    project_id: UUID,
-    scenario_id: UUID,
-    user_id: str,
-) -> None:
-    ok = repo.delete_scenario(project_id, scenario_id, user_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="Scenario not found.")--- ./scenarios/__init__.py ---
+def get_scenario(project_id: UUID, scenario_id: UUID, user_id: str) -> ScenarioRead:
+    row = repo.get_scenario(project_id, scenario_id, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Scenario not found.")
+    return ScenarioRead(**row)--- ./scenarios/__init__.py ---
 # app/scenarios/__init__.py
 from .router import router
 
@@ -1236,48 +1742,48 @@ __all__ = ["router"]--- ./scenarios/schemas.py ---
 # app/scenarios/schemas.py
 
 from uuid import UUID
-from typing import Any, Dict, Optional, List
+from typing import Optional, Literal
 from datetime import datetime
-
 from pydantic import BaseModel, Field
 
+# --- The shape of the JSON stored in 'parameters' column ---
+# This matches the sliders on your frontend
+class RonetParameters(BaseModel):
+    analysis_duration: int = Field(20, ge=5, le=30, description="Analysis period in years")
+    budget_strategy: Literal["unconstrained", "fixed_limit", "percent_baseline"] = "percent_baseline"
+    annual_budget_cap: Optional[float] = None
+    budget_percent_baseline: int = Field(100, ge=50, le=150, description="% of required budget")
+    policy_bias: Literal["preventive", "balanced", "reactive"] = "balanced"
+    discount_rate: float = 8.0
 
-class ScenarioAssumptionsBase(BaseModel):
-    """
-    'parameters' is where we keep actual sliders/inputs, e.g.
-    {
-      "analysis_period_years": 20,
-      "discount_rate": 0.08,
-      "annual_budget_million": 250,
-      "unit_cost_reseal_per_km": 0.8,
-      "unit_cost_reconstruct_per_km": 3.5,
-      "routine_maintenance_pct": 0.03
-    }
-    """
+# --- CRUD Schemas ---
+
+class ScenarioCreate(BaseModel):
     name: str
     description: Optional[str] = None
     is_baseline: bool = False
-    parameters: Dict[str, Any] = Field(default_factory=dict)
-
-
-class ScenarioCreate(ScenarioAssumptionsBase):
-    pass
-
+    # Default to standard parameters if none provided
+    parameters: RonetParameters = Field(default_factory=RonetParameters)
 
 class ScenarioUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
-    is_baseline: Optional[bool] = None
-    parameters: Optional[Dict[str, Any]] = None
+    # Allow partial updates to parameters
+    parameters: Optional[RonetParameters] = None
 
-
-class ScenarioRead(ScenarioAssumptionsBase):
+class ScenarioRead(BaseModel):
     id: UUID
     project_id: UUID
-    user_id: str
+    user_id: UUID
+    name: str
+    description: Optional[str]
+    is_baseline: bool
+    parameters: RonetParameters  # API always returns parsed structure
     created_at: datetime
     updated_at: datetime
 
+    class Config:
+        from_attributes = True
 
 class ScenarioSummary(BaseModel):
     id: UUID
@@ -1288,7 +1794,6 @@ class ScenarioSummary(BaseModel):
 
 from uuid import UUID
 from typing import List
-
 from fastapi import APIRouter, Depends, status
 
 from app.routers.projects import get_current_user_id
@@ -1302,12 +1807,24 @@ from . import service
 
 router = APIRouter()
 
+# --- Config Page Endpoint ---
+@router.get(
+    "/{project_id}/scenarios/baseline",
+    response_model=ScenarioRead,
+    summary="Get (or create) the baseline scenario for config page"
+)
+def get_project_baseline(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+):
+    return service.get_or_create_baseline(project_id, user_id)
+
+# --- Standard CRUD ---
 
 @router.post(
     "/{project_id}/scenarios",
     response_model=ScenarioRead,
     status_code=status.HTTP_201_CREATED,
-    summary="Create a new scenario for this project",
 )
 def create_project_scenario(
     project_id: UUID,
@@ -1316,11 +1833,9 @@ def create_project_scenario(
 ):
     return service.create_scenario(project_id, user_id, payload)
 
-
 @router.get(
     "/{project_id}/scenarios",
     response_model=List[ScenarioSummary],
-    summary="List all scenarios for this project",
 )
 def list_project_scenarios(
     project_id: UUID,
@@ -1328,11 +1843,9 @@ def list_project_scenarios(
 ):
     return service.list_scenarios(project_id, user_id)
 
-
 @router.get(
     "/{project_id}/scenarios/{scenario_id}",
     response_model=ScenarioRead,
-    summary="Get a single scenario with full assumptions",
 )
 def get_project_scenario(
     project_id: UUID,
@@ -1341,11 +1854,9 @@ def get_project_scenario(
 ):
     return service.get_scenario(project_id, scenario_id, user_id)
 
-
 @router.put(
     "/{project_id}/scenarios/{scenario_id}",
     response_model=ScenarioRead,
-    summary="Update a scenario",
 )
 def update_project_scenario(
     project_id: UUID,
@@ -1353,30 +1864,13 @@ def update_project_scenario(
     payload: ScenarioUpdate,
     user_id: str = Depends(get_current_user_id),
 ):
-    return service.update_scenario(project_id, scenario_id, user_id, payload)
-
-
-@router.delete(
-    "/{project_id}/scenarios/{scenario_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete a scenario",
-)
-def delete_project_scenario(
-    project_id: UUID,
-    scenario_id: UUID,
-    user_id: str = Depends(get_current_user_id),
-):
-    service.delete_scenario(project_id, scenario_id, user_id)
-    return--- ./scenarios/repository.py ---
+    return service.update_scenario(project_id, scenario_id, user_id, payload)--- ./scenarios/repository.py ---
 # app/scenarios/repository.py
 
 from uuid import UUID
 from typing import List, Dict, Any, Optional
-
 from psycopg2.extras import Json
-
 from app.routers.projects import get_db_connection
-
 
 def create_scenario(
     project_id: UUID,
@@ -1394,6 +1888,10 @@ def create_scenario(
             name, description, is_baseline,
             parameters, created_at, updated_at;
     """
+    
+    # Ensure parameters are serialized to JSON
+    # payload["parameters"] comes in as a dict from the Pydantic model
+    params_json = Json(payload.get("parameters", {}))
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -1405,58 +1903,57 @@ def create_scenario(
                     payload["name"],
                     payload.get("description"),
                     payload.get("is_baseline", False),
-                    Json(payload.get("parameters", {})),
+                    params_json,
                 ),
             )
             row = cur.fetchone()
             conn.commit()
-            return dict(zip([d[0] for d in cur.description], row))
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))
 
-
-def list_scenarios(
-    project_id: UUID,
-    user_id: str,
-) -> List[Dict[str, Any]]:
+def list_scenarios(project_id: UUID, user_id: str) -> List[Dict[str, Any]]:
     sql = """
-        SELECT
-            id, project_id, user_id,
-            name, description, is_baseline,
-            parameters, created_at, updated_at
+        SELECT id, name, is_baseline, created_at
         FROM public.project_scenarios
         WHERE project_id = %s AND user_id = %s
-        ORDER BY is_baseline DESC, created_at ASC;
+        ORDER BY is_baseline DESC, created_at DESC;
     """
-
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (str(project_id), user_id))
             rows = cur.fetchall()
             cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, row)) for row in rows]
+            return [dict(zip(cols, r)) for r in rows]
 
-
-def get_scenario(
-    project_id: UUID,
-    scenario_id: UUID,
-    user_id: str,
-) -> Optional[Dict[str, Any]]:
+def get_scenario(project_id: UUID, scenario_id: UUID, user_id: str) -> Optional[Dict[str, Any]]:
     sql = """
-        SELECT
-            id, project_id, user_id,
-            name, description, is_baseline,
-            parameters, created_at, updated_at
-        FROM public.project_scenarios
+        SELECT * FROM public.project_scenarios
         WHERE project_id = %s AND id = %s AND user_id = %s;
     """
-
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (str(project_id), str(scenario_id), user_id))
             row = cur.fetchone()
             if not row:
                 return None
-            return dict(zip([d[0] for d in cur.description], row))
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))
 
+def get_baseline_scenario(project_id: UUID, user_id: str) -> Optional[Dict[str, Any]]:
+    """Helper to find the designated baseline scenario."""
+    sql = """
+        SELECT * FROM public.project_scenarios
+        WHERE project_id = %s AND user_id = %s AND is_baseline = true
+        LIMIT 1;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), user_id))
+            row = cur.fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))
 
 def update_scenario(
     project_id: UUID,
@@ -1464,9 +1961,7 @@ def update_scenario(
     user_id: str,
     payload: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    """
-    Partial update; only apply fields present in payload.
-    """
+    
     fields = []
     values = []
 
@@ -1481,24 +1976,21 @@ def update_scenario(
         values.append(payload["is_baseline"])
     if "parameters" in payload:
         fields.append("parameters = %s")
+        # Ensure we wrap the dict in Json() adapter
         values.append(Json(payload["parameters"]))
 
     if not fields:
         return get_scenario(project_id, scenario_id, user_id)
 
-    # updated_at
     fields.append("updated_at = now()")
-
+    
     sql = f"""
         UPDATE public.project_scenarios
         SET {", ".join(fields)}
         WHERE project_id = %s AND id = %s AND user_id = %s
-        RETURNING
-            id, project_id, user_id,
-            name, description, is_baseline,
-            parameters, created_at, updated_at;
+        RETURNING *;
     """
-
+    
     values.extend([str(project_id), str(scenario_id), user_id])
 
     with get_db_connection() as conn:
@@ -1508,25 +2000,8 @@ def update_scenario(
             conn.commit()
             if not row:
                 return None
-            return dict(zip([d[0] for d in cur.description], row))
-
-
-def delete_scenario(
-    project_id: UUID,
-    scenario_id: UUID,
-    user_id: str,
-) -> bool:
-    sql = """
-        DELETE FROM public.project_scenarios
-        WHERE project_id = %s AND id = %s AND user_id = %s;
-    """
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (str(project_id), str(scenario_id), user_id))
-            deleted = cur.rowcount > 0
-            conn.commit()
-            return deleted--- ./db/models.py ---
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))--- ./db/models.py ---
 # app/db/models.py
 
 from pydantic import BaseModel
@@ -1624,14 +2099,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Routers
+# NOTE: Ensure each module's __init__.py exposes 'router' 
+# or change imports to: from app.master_data.router import router as ...
 from app.routers import projects
 from app.master_data import router as master_data_router
 from app.network_snapshot import router as network_snapshot_router
 from app.scenarios import router as scenarios_router
-from app.dashboards import router as dashboards_router
-
-
-
+from app.computation import router as computation_router
+# Only include this if the dashboards module exists to avoid startup errors
+from app.dashboards import router as dashboards_router 
+from app.routers import provincial_stats
 
 # -------------------------------------------------------------------
 # FastAPI APP CONFIG
@@ -1672,18 +2149,32 @@ app.include_router(
 app.include_router(
     network_snapshot_router, 
     prefix="/api/v1/projects", 
-    tags=["Network"])
-
+    tags=["Network"]
+)
 
 app.include_router(
     scenarios_router, 
     prefix="/api/v1/projects", 
-    tags=["Scenarios"])
+    tags=["Scenarios"]
+)
 
+
+app.include_router(
+    computation_router,
+    prefix="/api/v1/projects",
+    tags=["Computation"]
+)
+# Uncomment when the dashboards module is ready
 app.include_router(
     dashboards_router, 
     prefix="/api/v1/projects", 
     tags=["Dashboards"]
+)
+
+app.include_router(
+    provincial_stats.router, 
+    prefix="/api/v1/provincial-stats", 
+    tags=["Provincial Stats"]
 )
 
 # -------------------------------------------------------------------
@@ -1694,622 +2185,253 @@ def read_root():
     return {
         "status": "ok",
         "service": "Mosianedi Investment API"
-    }--- ./master_data/service.py ---
-# app/master_data/service.py
-from typing import Any, Dict, List, Optional
-from uuid import UUID
-
-from fastapi import HTTPException, UploadFile
-
-from app.db.schemas import MasterDataUploadStatus
-from .schemas import DataPreviewResponse
-from .validation import (
-    parse_master_data_file,
-    parse_master_workbook,
-    validate_flat_segments_df,
-    validate_segments_sheet,
-)
-from . import repository
+    }--- ./proposal_data/service.py ---
+from typing import Dict, Any
+from .schemas import ProposalDataPayload
 
 
-async def upload_master_data_service(
-    project_id: UUID,
-    user_id: str,
-    upload_file: UploadFile,
-) -> MasterDataUploadStatus:
-    """
-    Orchestrates upload + validation + workbook parsing + persistence.
-
-    - For Excel workbooks:
-        * parse all relevant sheets into workbook_payload (JSON)
-        * validate the 'segments' sheet
-    - For CSV:
-        * treat the flat table as the segments sheet
-        * optionally still store it in workbook_payload["segments"]
-    """
-    file_bytes = await upload_file.read()
-    if not file_bytes:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-
-    mime_type = upload_file.content_type or "application/octet-stream"
-    file_size = len(file_bytes)
-    original_filename = upload_file.filename or "uploaded_file"
-    name_lower = original_filename.lower()
-
-    status: str
-    row_count: Optional[int]
-    validation_errors: Dict[str, Any]
-    workbook_payload: Optional[Dict[str, Any]] = None
-
-    try:
-        # -------- Excel workbook path --------
-        if name_lower.endswith((".xlsx", ".xls")):
-            # Parse full workbook into JSON-friendly payload
-            workbook_payload = parse_master_workbook(file_bytes, original_filename)
-
-            # Validate the segments sheet from that payload
-            status, row_count, validation_errors = validate_segments_sheet(
-                workbook_payload
-            )
-
-        # -------- CSV / flat table path --------
-        else:
-            df = parse_master_data_file(file_bytes, original_filename)
-            status, row_count, validation_errors = validate_flat_segments_df(df)
-
-            # Optionally store the CSV as a "segments" sheet in the payload
-            df_norm = df.fillna("")
-            df_norm.columns = [str(c).strip().lower() for c in df_norm.columns]
-            workbook_payload = {
-                "segments": df_norm.to_dict(orient="records"),
-            }
-
-    except HTTPException as exc:
-        # Parsing/format errors – treat as failed but still store file & error
-        status = "failed"
-        row_count = None
-        validation_errors = {
-            "parsing_error": getattr(exc, "detail", None)
-            or "File could not be parsed."
-        }
-        workbook_payload = None
-
-    except Exception as e:
-        status = "failed"
-        row_count = None
-        validation_errors = {
-            "validation_exception": f"Unexpected error during validation: {str(e)}"
-        }
-        workbook_payload = None
-
-    # ---- PERSIST ----
-    record = repository.insert_master_data_upload(
-        project_id=project_id,
-        user_id=user_id,
-        original_filename=original_filename,
-        mime_type=mime_type,
-        file_size=file_size,
-        storage_strategy="inline",
-        file_bytes=file_bytes,
-        status=status,
-        row_count=row_count,
-        validation_errors=validation_errors if validation_errors else None,
-        # Store parsed workbook JSON (if any)
-        workbook_payload=workbook_payload if workbook_payload else None,
-    )
-
-    return MasterDataUploadStatus(**record)
-
-
-def get_last_master_data_upload_service(
-    project_id: UUID,
-    user_id: str,
-) -> MasterDataUploadStatus:
-    record = repository.fetch_last_master_data_upload(project_id, user_id)
-    if not record:
-        raise HTTPException(
-            status_code=404,
-            detail="No master data uploads found for this project.",
-        )
-    return MasterDataUploadStatus(**record)
-
-
-def get_all_master_data_uploads_service(
-    project_id: UUID,
-    user_id: str,
-) -> List[MasterDataUploadStatus]:
-    rows = repository.fetch_all_master_data_uploads(project_id, user_id)
-    return [MasterDataUploadStatus(**r) for r in rows]
-
-
-def _preview_from_blob(file_bytes: bytes, filename: str) -> DataPreviewResponse:
-    """
-    Preview helper: parses the first sheet / CSV file and returns the first 50 rows.
-    """
-    df = parse_master_data_file(file_bytes, filename)
-    total_rows = len(df.index)
-    preview_df = df.head(50).fillna("")
-    preview_data = preview_df.to_dict("records")
-    return DataPreviewResponse(
-        preview_data=preview_data,
-        total_rows=total_rows,
-        columns=list(df.columns),
+def compute_total_km(p: ProposalDataPayload) -> float:
+    return (
+        p.km_arid
+        + p.km_semi_arid
+        + p.km_dry_sub_humid
+        + p.km_moist_sub_humid
+        + p.km_humid
     )
 
 
-def get_master_data_preview_latest_service(
-    project_id: UUID,
-    user_id: str,
-) -> DataPreviewResponse:
-    blob = repository.fetch_upload_blob_latest(project_id, user_id)
-    if not blob:
-        raise HTTPException(
-            status_code=404,
-            detail="No master data upload file found for this project.",
-        )
-    file_bytes, filename = blob
-    if not file_bytes:
-        raise HTTPException(
-            status_code=500,
-            detail="File blob was empty after retrieval.",
-        )
-    return _preview_from_blob(file_bytes, filename)
+def to_inputs_payload(p: ProposalDataPayload) -> Dict[str, Any]:
+    # Store as JSON in projects.inputs_payload for demo speed (no new tables needed)
+    return {
+        "km_arid": p.km_arid,
+        "km_semi_arid": p.km_semi_arid,
+        "km_dry_sub_humid": p.km_dry_sub_humid,
+        "km_moist_sub_humid": p.km_moist_sub_humid,
+        "km_humid": p.km_humid,
+        "avg_vci": p.avg_vci,
+        "vehicle_km": p.vehicle_km,
+        "pct_vehicle_km_used": p.pct_vehicle_km_used,
+        "fuel_sales": p.fuel_sales,
+        "notes": p.notes,
+        "extra_inputs": p.extra_inputs or {},
+    }
 
 
-def get_master_data_preview_by_upload_service(
-    project_id: UUID,
-    upload_id: UUID,
-    user_id: str,
-) -> DataPreviewResponse:
-    blob = repository.fetch_upload_blob_by_id(project_id, upload_id, user_id)
-    if not blob:
-        raise HTTPException(
-            status_code=404,
-            detail="Upload not found for preview.",
-        )
-    file_bytes, filename = blob
-    if not file_bytes:
-        raise HTTPException(
-            status_code=500,
-            detail="File blob was empty after retrieval.",
-        )
-    return _preview_from_blob(file_bytes, filename)--- ./master_data/__init__.py ---
+def from_inputs_payload(d: Dict[str, Any]) -> ProposalDataPayload:
+    # Defensive defaults so GET works even when nothing saved yet
+    return ProposalDataPayload(
+        km_arid=float(d.get("km_arid", 0) or 0),
+        km_semi_arid=float(d.get("km_semi_arid", 0) or 0),
+        km_dry_sub_humid=float(d.get("km_dry_sub_humid", 0) or 0),
+        km_moist_sub_humid=float(d.get("km_moist_sub_humid", 0) or 0),
+        km_humid=float(d.get("km_humid", 0) or 0),
+        avg_vci=float(d.get("avg_vci", 0) or 0),
+        vehicle_km=float(d.get("vehicle_km", 0) or 0),
+        pct_vehicle_km_used=float(d.get("pct_vehicle_km_used", 0) or 0),
+        fuel_sales=float(d.get("fuel_sales", 0) or 0),
+        notes=d.get("notes"),
+        extra_inputs=d.get("extra_inputs") or {},
+    )
+--- ./proposal_data/__init__.py ---
 # app/master_data/__init__.py
 from .router import router
 
-__all__ = ["router"]--- ./master_data/schemas.py ---
-# app/master_data/schemas.py
-from typing import Any, Dict, List
-from pydantic import BaseModel
+__all__ = ["router"]--- ./proposal_data/schemas.py ---
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
 
 
-class DataPreviewResponse(BaseModel):
-    preview_data: List[Dict[str, Any]]
-    total_rows: int
-    columns: List[str]--- ./master_data/router.py ---
-# app/master_data/router.py
-from typing import List
-from uuid import UUID
+class ProposalDataPayload(BaseModel):
+    # Climate zone km
+    km_arid: float = Field(0, ge=0)
+    km_semi_arid: float = Field(0, ge=0)
+    km_dry_sub_humid: float = Field(0, ge=0)
+    km_moist_sub_humid: float = Field(0, ge=0)
+    km_humid: float = Field(0, ge=0)
 
-from fastapi import APIRouter, Depends, File, UploadFile
+    # Indicators
+    avg_vci: float = Field(0, ge=0)
+    vehicle_km: float = Field(0, ge=0)
+    pct_vehicle_km_used: float = Field(0, ge=0, le=100)
+    fuel_sales: float = Field(0, ge=0)
 
-from app.db.schemas import MasterDataUploadStatus
-from app.routers.projects import get_current_user_id
-from .schemas import DataPreviewResponse
-from . import service
-
-router = APIRouter()
-
-
-# POST /api/v1/projects/{project_id}/master-data/upload
-@router.post(
-    "/{project_id}/master-data/upload",
-    response_model=MasterDataUploadStatus,
-)
-async def upload_master_data(
-    project_id: UUID,
-    file: UploadFile = File(...),
-    user_id: str = Depends(get_current_user_id),
-):
-    return await service.upload_master_data_service(
-        project_id=project_id,
-        user_id=user_id,
-        upload_file=file,
-    )
+    notes: Optional[str] = None
+    extra_inputs: Dict[str, Any] = {}
 
 
-# GET /api/v1/projects/{project_id}/master-data/last-upload
-@router.get(
-    "/{project_id}/master-data/last-upload",
-    response_model=MasterDataUploadStatus,
-)
-async def get_last_master_data_upload(
-    project_id: UUID,
-    user_id: str = Depends(get_current_user_id),
-):
-    return service.get_last_master_data_upload_service(project_id, user_id)
+class ProposalDataResponse(BaseModel):
+    project_id: str
+    user_id: str
+    total_km: float
+    payload: ProposalDataPayload
+    updated_at: Optional[str] = None
+--- ./proposal_data/router.py ---
+from fastapi import APIRouter, Depends, HTTPException
+from app.routers.projects import get_db_connection  # uses your existing helper
+from app.auth import get_current_user  # adjust import to your project
+from .schemas import ProposalDataPayload, ProposalDataResponse
+from . import repository
+from .service import compute_total_km, to_inputs_payload, from_inputs_payload
+
+router = APIRouter(prefix="/projects", tags=["proposal-data"])
 
 
-# ✅ History: list all uploads for this project+user
-@router.get(
-    "/{project_id}/master-data/uploads",
-    response_model=List[MasterDataUploadStatus],
-)
-async def get_all_master_data_uploads(
-    project_id: UUID,
-    user_id: str = Depends(get_current_user_id),
-):
-    return service.get_all_master_data_uploads_service(project_id, user_id)
-
-
-# GET /api/v1/projects/{project_id}/master-data/preview  (latest file)
-@router.get(
-    "/{project_id}/master-data/preview",
-    response_model=DataPreviewResponse,
-)
-async def get_master_data_preview_latest(
-    project_id: UUID,
-    user_id: str = Depends(get_current_user_id),
-):
-    return service.get_master_data_preview_latest_service(project_id, user_id)
-
-
-# ✅ Preview a specific upload by ID (history picker)
-@router.get(
-    "/{project_id}/master-data/uploads/{upload_id}/preview",
-    response_model=DataPreviewResponse,
-)
-async def get_master_data_preview_by_upload(
-    project_id: UUID,
-    upload_id: UUID,
-    user_id: str = Depends(get_current_user_id),
-):
-    return service.get_master_data_preview_by_upload_service(
-        project_id, upload_id, user_id
-    )--- ./master_data/repository.py ---
-# app/master_data/repository.py
-from typing import Any, Dict, List, Optional, Tuple
-from uuid import UUID
-
-import psycopg2
-from psycopg2.extras import Json
-
-from app.routers.projects import get_db_connection
-
-
-def insert_master_data_upload(
-    project_id: UUID,
-    user_id: str,
-    original_filename: str,
-    mime_type: str,
-    file_size: int,
-    storage_strategy: str,
-    file_bytes: bytes,
-    status: str,
-    row_count: Optional[int],
-    validation_errors: Optional[Dict[str, Any]],
-    workbook_payload: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """
-    Insert a new row into master_data_uploads and return the record.
-
-    workbook_payload:
-        Parsed multi-sheet workbook (segments, costs, iri, etc.) stored as JSONB.
-        Can be None for simple CSV uploads.
-    """
-    sql = """
-        INSERT INTO public.master_data_uploads (
-            project_id, user_id,
-            original_filename, mime_type, file_size,
-            storage_strategy, file_blob,
-            status, row_count, validation_errors,
-            workbook_payload
-        )
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        RETURNING
-            id, project_id, user_id,
-            original_filename, mime_type, file_size,
-            status, row_count, validation_errors, created_at;
-    """
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                sql,
-                (
-                    str(project_id),
-                    user_id,
-                    original_filename,
-                    mime_type,
-                    file_size,
-                    storage_strategy,
-                    psycopg2.Binary(file_bytes),
-                    status,
-                    row_count,
-                    Json(validation_errors) if validation_errors else None,
-                    Json(workbook_payload) if workbook_payload else None,
-                ),
-            )
-            row = cur.fetchone()
-            columns = [d[0] for d in cur.description]
-            record = dict(zip(columns, row))
-            conn.commit()
-            return record
-
-
-def fetch_last_master_data_upload(
-    project_id: UUID,
-    user_id: str,
-) -> Optional[Dict[str, Any]]:
-    """
-    Return the latest upload for a project+user, or None.
-    """
-    sql = """
-        SELECT
-            id, project_id, user_id,
-            original_filename, mime_type, file_size,
-            status, row_count, validation_errors, created_at
-        FROM public.master_data_uploads
-        WHERE project_id = %s AND user_id = %s
-        ORDER BY created_at DESC
-        LIMIT 1;
-    """
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (str(project_id), user_id))
-            row = cur.fetchone()
-            if not row:
-                return None
-            columns = [d[0] for d in cur.description]
-            return dict(zip(columns, row))
-
-
-def fetch_all_master_data_uploads(
-    project_id: UUID,
-    user_id: str,
-) -> List[Dict[str, Any]]:
-    """
-    Return all uploads (history) for a project+user, newest → oldest.
-    """
-    sql = """
-        SELECT
-            id, project_id, user_id,
-            original_filename, mime_type, file_size,
-            status, row_count, validation_errors, created_at
-        FROM public.master_data_uploads
-        WHERE project_id = %s AND user_id = %s
-        ORDER BY created_at DESC;
-    """
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (str(project_id), user_id))
-            rows = cur.fetchall()
-            if not rows:
-                return []
-            columns = [d[0] for d in cur.description]
-            return [dict(zip(columns, r)) for r in rows]
-
-
-def fetch_upload_blob_latest(
-    project_id: UUID,
-    user_id: str,
-) -> Optional[Tuple[bytes, str]]:
-    """
-    Return (file_bytes, filename) for the latest upload, or None.
-    """
-    sql = """
-        SELECT file_blob, original_filename
-        FROM public.master_data_uploads
-        WHERE project_id = %s AND user_id = %s
-        ORDER BY created_at DESC
-        LIMIT 1;
-    """
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (str(project_id), user_id))
-            row = cur.fetchone()
-            if not row:
-                return None
-
-            file_blob_raw, filename = row
-            file_bytes = (
-                file_blob_raw.tobytes()
-                if isinstance(file_blob_raw, memoryview)
-                else file_blob_raw
-            )
-            return file_bytes, filename
-
-
-def fetch_upload_blob_by_id(
-    project_id: UUID,
-    upload_id: UUID,
-    user_id: str,
-) -> Optional[Tuple[bytes, str]]:
-    """
-    Return (file_bytes, filename) for a specific upload, or None.
-    """
-    sql = """
-        SELECT file_blob, original_filename
-        FROM public.master_data_uploads
-        WHERE id = %s AND project_id = %s AND user_id = %s
-        LIMIT 1;
-    """
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (str(upload_id), str(project_id), user_id))
-            row = cur.fetchone()
-            if not row:
-                return None
-
-            file_blob_raw, filename = row
-            file_bytes = (
-                file_blob_raw.tobytes()
-                if isinstance(file_blob_raw, memoryview)
-                else file_blob_raw
-            )
-            return file_bytes, filename--- ./master_data/validation.py ---
-# app/master_data/validation.py
-from typing import Dict, Any, Optional, Set, Tuple, List
-from io import BytesIO
-
-import pandas as pd
-from fastapi import HTTPException
-
-# -------------------------------------------------
-# Expected workbook structure
-# -------------------------------------------------
-
-# We validate only the core "segments" sheet for now.
-REQUIRED_SEGMENT_COLUMNS: Set[str] = {
-    "segment_id",
-    "road_id",
-    "road_class",
-    "surface_type",
-    "length_km",
-}
-
-# Other sheets are optional but expected in the Mosianedi template.
-EXPECTED_SHEETS: List[str] = [
-    "segments",
-    "network_type_surface",
-    "network_length",
-    "asset_value",
-    "iri_defaults",
-    "road_costs",
-]
-
-# -------------------------------------------------
-# Parsing helpers
-# -------------------------------------------------
-
-
-def parse_master_data_file(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """
-    Helper used for previewing the FIRST sheet only.
-
-    - For Excel workbooks: return the first sheet as a DataFrame
-      (typically the 'segments' sheet in our template).
-    - For CSV: parse as a flat table.
-    """
-    buffer = BytesIO(file_bytes)
-    name = filename.lower()
-
+@router.get("/{project_id}/proposal-data", response_model=ProposalDataResponse)
+def read_proposal_data(project_id: str, user=Depends(get_current_user)):
+    conn = get_db_connection()
     try:
-        if name.endswith((".xlsx", ".xls")):
-            xls = pd.ExcelFile(buffer)
-            first_sheet = xls.sheet_names[0]
-            df = xls.parse(sheet_name=first_sheet)
-            return df
-        elif name.endswith(".csv"):
-            return pd.read_csv(buffer)
-        else:
-            raise HTTPException(status_code=400, detail="Invalid file type.")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not parse file: {str(e)}")
+        row = repository.get_proposal_data(conn, project_id, user["id"])
+        if not row:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        payload = from_inputs_payload(row["inputs_payload"])
+        return ProposalDataResponse(
+            project_id=project_id,
+            user_id=str(user["id"]),
+            total_km=compute_total_km(payload),
+            payload=payload,
+            updated_at=row.get("updated_at"),
+        )
+    finally:
+        conn.close()
 
 
-# -------------------------------------------------
-# Workbook parser
-# -------------------------------------------------
+@router.put("/{project_id}/proposal-data", response_model=ProposalDataResponse)
+def save_proposal_data(project_id: str, body: ProposalDataPayload, user=Depends(get_current_user)):
+    conn = get_db_connection()
+    try:
+        try:
+            validate_or_raise(body)
+        except ProposalValidationError as e:
+            # 422 is standard for validation errors
+            raise HTTPException(status_code=422, detail={"errors": e.errors})
+
+        saved = repository.save_proposal_data(conn, project_id, user["id"], to_inputs_payload(body))
+        payload = from_inputs_payload(saved["inputs_payload"])
+        return ProposalDataResponse(
+            project_id=project_id,
+            user_id=str(user["id"]),
+            total_km=compute_total_km(payload),
+            payload=payload,
+            updated_at=saved.get("updated_at"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    finally:
+        conn.close()
+--- ./proposal_data/repository.py ---
+from typing import Optional, Dict, Any
+from datetime import datetime
 
 
-def parse_master_workbook(file_bytes: bytes, filename: str) -> Dict[str, Any]:
-    """
-    Parse our Mosianedi multi-sheet workbook into a JSON-friendly structure.
+def get_proposal_data(conn, project_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT inputs_payload, updated_at
+        FROM public.projects
+        WHERE id = %s AND user_id = %s
+        """,
+        (project_id, user_id),
+    )
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return None
 
-    Returns a dict like:
-    {
-        "segments": [ {...}, {...}, ... ],
-        "network_type_surface": [ ... ],
-        ...
-        "_sheet_errors": { "sheet_name": "error message", ... }
+    inputs_payload, updated_at = row
+    return {
+        "inputs_payload": inputs_payload or {},
+        "updated_at": updated_at.isoformat() if isinstance(updated_at, datetime) else updated_at,
     }
 
-    For CSV uploads, this returns {} (no workbook structure).
+
+def save_proposal_data(conn, project_id: str, user_id: str, inputs_payload: Dict[str, Any]) -> Dict[str, Any]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE public.projects
+        SET inputs_payload = %s,
+            updated_at = now()
+        WHERE id = %s AND user_id = %s
+        RETURNING inputs_payload, updated_at
+        """,
+        (inputs_payload, project_id, user_id),
+    )
+    row = cur.fetchone()
+    conn.commit()
+    cur.close()
+
+    if not row:
+        raise ValueError("Project not found or not owned by user")
+
+    payload, updated_at = row
+    return {
+        "inputs_payload": payload or {},
+        "updated_at": updated_at.isoformat() if isinstance(updated_at, datetime) else updated_at,
+    }
+--- ./proposal_data/validation.py ---
+from typing import Dict, Any, List, Tuple
+from .schemas import ProposalDataPayload
+
+
+class ProposalValidationError(Exception):
+    def __init__(self, errors: List[Dict[str, Any]]):
+        super().__init__("Proposal data validation failed")
+        self.errors = errors
+
+
+def validate_proposal_data(payload: ProposalDataPayload) -> Tuple[bool, List[Dict[str, Any]]]:
     """
-    name = filename.lower()
-
-    # CSV or other non-Excel ⇒ no workbook
-    if not name.endswith((".xlsx", ".xls")):
-        return {}
-
-    try:
-        xls = pd.ExcelFile(BytesIO(file_bytes))
-    except Exception as exc:
-        # Don't kill the upload; just record that the workbook couldn't be opened.
-        return {"_workbook_error": f"Could not open workbook: {exc}"}
-
-    payload: Dict[str, Any] = {}
-    sheet_errors: Dict[str, str] = {}
-
-    for sheet in EXPECTED_SHEETS:
-        if sheet not in xls.sheet_names:
-            # Sheet is optional — just skip if not present
-            continue
-
-        try:
-            df = xls.parse(sheet_name=sheet)
-
-            # Normalise column names: lowercase + trimmed
-            df.columns = [str(c).strip().lower() for c in df.columns]
-
-            # Replace NaNs with empty strings to keep JSON clean
-            df = df.fillna("")
-
-            payload[sheet] = df.to_dict(orient="records")
-        except Exception as exc:
-            sheet_errors[sheet] = str(exc)
-
-    if sheet_errors:
-        payload["_sheet_errors"] = sheet_errors
-
-    return payload
-
-
-# -------------------------------------------------
-# Validation helpers (segments only)
-# -------------------------------------------------
-
-
-def _validate_segments_df(df: pd.DataFrame) -> Tuple[str, Optional[int], Dict[str, Any]]:
+    Returns (ok, errors). Each error is:
+      { "field": "<field or group>", "message": "<human readable>", "code": "<stable_code>" }
     """
-    Internal helper to validate that a segments-style DataFrame
-    has the required columns.
-    """
-    row_count: Optional[int] = len(df.index)
-    validation_errors: Dict[str, Any] = {}
+    errors: List[Dict[str, Any]] = []
 
-    cols_lower = {c.lower() for c in df.columns}
-    missing = [col for col in REQUIRED_SEGMENT_COLUMNS if col not in cols_lower]
+    # Compute total km (business rule)
+    total_km = (
+        payload.km_arid
+        + payload.km_semi_arid
+        + payload.km_dry_sub_humid
+        + payload.km_moist_sub_humid
+        + payload.km_humid
+    )
 
-    if missing:
-        validation_errors["missing_columns"] = missing
-        return "failed", row_count, validation_errors
+    if total_km <= 0:
+        errors.append(
+            {
+                "field": "climate_km_total",
+                "message": "Total climate kilometres must be greater than 0.",
+                "code": "CLIMATE_TOTAL_ZERO",
+            }
+        )
 
-    return "validated", row_count, validation_errors
+    # Soft sanity checks (still allow save, but you can decide to treat as errors)
+    # For demo simplicity, keep as errors only if obviously invalid.
+    if payload.avg_vci == 0:
+        errors.append(
+            {
+                "field": "avg_vci",
+                "message": "Average VCI is 0. If unknown, enter an estimate rather than 0.",
+                "code": "AVG_VCI_ZERO",
+            }
+        )
+
+    # vehicle_km can be 0 in some edge cases, but usually indicates missing data
+    if payload.vehicle_km == 0:
+        errors.append(
+            {
+                "field": "vehicle_km",
+                "message": "Vehicle-km is 0. If unknown, enter an estimate rather than 0.",
+                "code": "VEHICLE_KM_ZERO",
+            }
+        )
+
+    ok = len(errors) == 0
+    return ok, errors
 
 
-def validate_flat_segments_df(df: pd.DataFrame) -> Tuple[str, Optional[int], Dict[str, Any]]:
-    """
-    Validate a flat (CSV / single-sheet) table as if it were the segments sheet.
-    """
-    return _validate_segments_df(df)
-
-
-def validate_segments_sheet(
-    workbook_payload: Dict[str, Any]
-) -> Tuple[str, Optional[int], Dict[str, Any]]:
-    """
-    Validate the 'segments' sheet inside a parsed workbook payload.
-
-    Expects workbook_payload["segments"] to be a list of dict rows.
-    """
-    if "segments" not in workbook_payload:
-        return "failed", None, {"missing_sheet": "segments"}
-
-    df = pd.DataFrame(workbook_payload["segments"])
-    return _validate_segments_df(df)
+def validate_or_raise(payload: ProposalDataPayload) -> None:
+    ok, errors = validate_proposal_data(payload)
+    if not ok:
+        raise ProposalValidationError(errors)
