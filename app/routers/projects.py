@@ -4,6 +4,7 @@ import psycopg2
 from contextlib import contextmanager
 from jose import jwt
 from uuid import UUID
+from typing import List, Dict, Any
 
 from app.db.schemas import ProjectMetadata, ProjectDB
 
@@ -33,6 +34,9 @@ def get_current_user_id(authorization: str = Header(None)) -> str:
         raise HTTPException(401, "Authorization header missing")
     try:
         scheme, token = authorization.split()
+        if scheme.lower() != "bearer":
+            raise HTTPException(401, "Invalid auth scheme (expected Bearer)")
+
         payload = jwt.decode(
             token,
             JWT_SECRET,
@@ -43,17 +47,26 @@ def get_current_user_id(authorization: str = Header(None)) -> str:
         if not sub:
             raise HTTPException(401, "Invalid token (sub missing)")
         return sub
+
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(401, "Invalid token")
 
 
+def _row_to_dict(cur, row) -> Dict[str, Any]:
+    cols = [desc[0] for desc in cur.description]
+    return dict(zip(cols, row))
+
+
 # -------------------------------------------------------------------
 # CREATE PROJECT (Proposal container) + initialize proposal_data row
 # -------------------------------------------------------------------
 @router.post("/", status_code=201)
-async def create_project(metadata: ProjectMetadata, user_id: str = Depends(get_current_user_id)):
+async def create_project(
+    metadata: ProjectMetadata,
+    user_id: str = Depends(get_current_user_id),
+):
     """
     Creates a project (proposal container) and immediately creates an empty proposal_data row (Option A).
     """
@@ -73,14 +86,12 @@ async def create_project(metadata: ProjectMetadata, user_id: str = Depends(get_c
     with get_db_connection() as conn:
         try:
             with conn.cursor() as cur:
-                # 1) create project
                 cur.execute(
                     sql_project,
                     (user_id, metadata.project_name, metadata.province, metadata.start_year),
                 )
                 project_id, created_at = cur.fetchone()
 
-                # 2) init proposal row
                 cur.execute(sql_proposal, (str(project_id), user_id))
 
             conn.commit()
@@ -124,14 +135,13 @@ def get_project(project_id: UUID, user_id: str = Depends(get_current_user_id)):
             if not row:
                 raise HTTPException(status_code=404, detail="Project not found")
 
-            cols = [desc[0] for desc in cur.description]
-            return dict(zip(cols, row))
+            return _row_to_dict(cur, row)
 
 
 # -------------------------------------------------------------------
 # LIST PROJECTS
 # -------------------------------------------------------------------
-@router.get("/", response_model=list[ProjectDB])
+@router.get("/", response_model=List[ProjectDB])
 async def list_projects(user_id: str = Depends(get_current_user_id)):
     sql = """
         SELECT
@@ -152,7 +162,7 @@ async def list_projects(user_id: str = Depends(get_current_user_id)):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (user_id,))
-            columns = [c[0] for c in cur.description]
             rows = cur.fetchall()
-
-    return [dict(zip(columns, row)) for row in rows]
+            return [_row_to_dict(cur, r) for r in rows]
+        
+        

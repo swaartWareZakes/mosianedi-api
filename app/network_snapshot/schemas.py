@@ -1,45 +1,49 @@
-# app/network_snapshot/schemas.py
-
-from uuid import UUID
-from typing import List, Optional
-
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+from typing import Dict, Any, Optional
 
 
-class LengthByCategory(BaseModel):
-    label: str
-    length_km: float
+class SnapshotProject(BaseModel):
+    id: str
+    project_name: str
+    province: str
+    start_year: int
+    proposal_title: Optional[str] = None
+    proposal_status: Optional[str] = None
 
 
-class AssetValueByCategory(BaseModel):
-    label: str
-    value: float
+class ClimateCategory(BaseModel):
+    arid: float
+    semi_arid: float
+    dry_sub_humid: float
+    moist_sub_humid: float
+    humid: float
+    total: float
 
 
-class UnitCostByCategory(BaseModel):
-    label: str
-    cost_per_km: float
+class ClimateBreakdown(BaseModel):
+    paved: ClimateCategory
+    gravel: ClimateCategory
+    network_total: float
 
 
-class NetworkSnapshot(BaseModel):
-    project_id: UUID
-    upload_id: UUID
+class Indicators(BaseModel):
+    avg_vci_used: float
+    vehicle_km: float
+    pct_vehicle_km_used: float
+    fuel_sales: float
+    pct_fuel_sales_used: float
+    fuel_option_selected: int
+    target_vci: float
+    extra_inputs: Dict[str, Any]
 
-    # --- Core from segments sheet ---
-    total_length_km: float
-    total_segments: int
-    total_roads: Optional[int] = None
 
-    length_by_road_class: List[LengthByCategory] = Field(default_factory=list)
-    length_by_surface_type: List[LengthByCategory] = Field(default_factory=list)
+class NetworkSnapshotPayload(BaseModel):
+    status: str
+    message: str
+    climate_breakdown: ClimateBreakdown
+    indicators: Indicators
 
-    # --- From network_length sheet (optional) ---
-    total_network_length_km: Optional[float] = None
-    length_by_network_type: List[LengthByCategory] = Field(default_factory=list)
 
-    # --- From asset_value sheet (optional) ---
-    total_asset_value: Optional[float] = None
-    asset_value_by_category: List[AssetValueByCategory] = Field(default_factory=list)
-
-    # --- From road_costs sheet (optional) ---
-    unit_costs_by_surface: List[UnitCostByCategory] = Field(default_factory=list)
+class NetworkSnapshotResponse(BaseModel):
+    project: SnapshotProject
+    snapshot: NetworkSnapshotPayload

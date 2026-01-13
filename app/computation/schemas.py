@@ -1,7 +1,6 @@
-# app/computation/schemas.py
-
-from typing import List, Dict, Optional
+from typing import List
 from pydantic import BaseModel
+from datetime import datetime
 
 class YearlyResult(BaseModel):
     year: int
@@ -14,7 +13,6 @@ class YearlyResult(BaseModel):
 
 class SimulationOutput(BaseModel):
     project_id: str
-    scenario_id: str
     year_count: int
     
     # Time Series Data (for charts)
@@ -23,3 +21,5 @@ class SimulationOutput(BaseModel):
     # Aggregates (for summary cards)
     total_cost_npv: float
     final_network_condition: float
+    
+    generated_at: datetime = datetime.now()

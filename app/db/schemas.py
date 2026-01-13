@@ -1,10 +1,11 @@
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional
 from datetime import datetime
 from uuid import UUID
 
+
 # ============================================================
-# PROJECT Schemas (NEW - proposal-first flow)
+# PROJECT Schemas (proposal-first flow)
 # ============================================================
 
 class ProjectMetadata(BaseModel):
@@ -20,7 +21,6 @@ class ProjectDB(BaseModel):
     province: str
     start_year: int
 
-    # Optional fields if your DB has them (you SELECT them already)
     proposal_title: Optional[str] = None
     proposal_status: Optional[str] = None
 

@@ -1,51 +1,34 @@
-# app/scenarios/schemas.py
-
+from pydantic import BaseModel
+from typing import Optional
 from uuid import UUID
-from typing import Optional, Literal
 from datetime import datetime
-from pydantic import BaseModel, Field
 
-# --- The shape of the JSON stored in 'parameters' column ---
-# This matches the sliders on your frontend
-class RonetParameters(BaseModel):
-    analysis_duration: int = Field(20, ge=5, le=30, description="Analysis period in years")
-    budget_strategy: Literal["unconstrained", "fixed_limit", "percent_baseline"] = "percent_baseline"
-    annual_budget_cap: Optional[float] = None
-    budget_percent_baseline: int = Field(100, ge=50, le=150, description="% of required budget")
-    policy_bias: Literal["preventive", "balanced", "reactive"] = "balanced"
-    discount_rate: float = 8.0
-
-# --- CRUD Schemas ---
-
-class ScenarioCreate(BaseModel):
-    name: str
-    description: Optional[str] = None
-    is_baseline: bool = False
-    # Default to standard parameters if none provided
-    parameters: RonetParameters = Field(default_factory=RonetParameters)
-
-class ScenarioUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    # Allow partial updates to parameters
-    parameters: Optional[RonetParameters] = None
-
-class ScenarioRead(BaseModel):
+class ForecastParametersOut(BaseModel):
     id: UUID
     project_id: UUID
-    user_id: UUID
-    name: str
-    description: Optional[str]
-    is_baseline: bool
-    parameters: RonetParameters  # API always returns parsed structure
-    created_at: datetime
+    
+    # Section A: Economic Reality
+    cpi_percentage: float = 6.0
+    discount_rate: float = 8.0
+    previous_allocation: float = 0
+    
+    # Section B: Engineering Reality
+    paved_deterioration_rate: str = "Medium" # Slow, Medium, Fast
+    gravel_loss_rate: float = 20.0          # mm/year
+    climate_stress_factor: str = "Medium"   # Low, Medium, High
+    
+    # Section C: Time Machine
+    analysis_duration: int = 5
+    
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
-
-class ScenarioSummary(BaseModel):
-    id: UUID
-    name: str
-    is_baseline: bool
-    created_at: datetime
+class ForecastParametersPatch(BaseModel):
+    cpi_percentage: Optional[float] = None
+    discount_rate: Optional[float] = None
+    previous_allocation: Optional[float] = None
+    
+    paved_deterioration_rate: Optional[str] = None
+    gravel_loss_rate: Optional[float] = None
+    climate_stress_factor: Optional[str] = None
+    
+    analysis_duration: Optional[int] = None

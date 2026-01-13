@@ -1,10 +1,7 @@
-# app/network_snapshot/service.py
-
 from uuid import UUID
 from typing import Optional, Dict, Any
 
 from fastapi import HTTPException
-
 from app.routers.projects import get_db_connection
 
 
@@ -35,9 +32,6 @@ def _fetch_project(project_id: UUID, user_id: str) -> Dict[str, Any]:
 
 
 def _fetch_proposal_data(project_id: UUID, user_id: str) -> Dict[str, Any]:
-    """
-    Option A guarantees a row exists, but we still code defensively.
-    """
     sql = """
         SELECT
           id,
@@ -45,21 +39,18 @@ def _fetch_proposal_data(project_id: UUID, user_id: str) -> Dict[str, Any]:
           user_id,
           data_source,
 
-          -- PAVED climate zone lane-km
           paved_arid,
           paved_semi_arid,
           paved_dry_sub_humid,
           paved_moist_sub_humid,
           paved_humid,
 
-          -- GRAVEL climate zone lane-km
           gravel_arid,
           gravel_semi_arid,
           gravel_dry_sub_humid,
           gravel_moist_sub_humid,
           gravel_humid,
 
-          -- indicators
           avg_vci_used,
           vehicle_km,
           pct_vehicle_km_used,
@@ -80,7 +71,6 @@ def _fetch_proposal_data(project_id: UUID, user_id: str) -> Dict[str, Any]:
             cur.execute(sql, (str(project_id), user_id))
             row = cur.fetchone()
             if not row:
-                # If Option A somehow didn't create it, we return a clear message
                 raise HTTPException(
                     status_code=404,
                     detail="Proposal data not found for this project. (Expected row from Option A)",
@@ -90,23 +80,10 @@ def _fetch_proposal_data(project_id: UUID, user_id: str) -> Dict[str, Any]:
 
 
 def _n(x: Optional[float]) -> float:
-    """Coerce None to 0 for numeric defaults."""
     return float(x or 0)
 
 
 def get_network_snapshot(project_id: UUID, user_id: str) -> Dict[str, Any]:
-    """
-    New-flow Network Snapshot (proposal-first).
-
-    This no longer reads:
-      - master_data_uploads
-      - workbook_payload
-      - file_blob
-      - parse_master_data_file
-
-    It returns a lightweight snapshot derived from proposal inputs only.
-    Later we can extend it to include segments/computation outputs.
-    """
     project = _fetch_project(project_id, user_id)
     proposal = _fetch_proposal_data(project_id, user_id)
 

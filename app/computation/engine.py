@@ -1,184 +1,68 @@
-# app/computation/engine.py
-
 import pandas as pd
 import numpy as np
 from uuid import UUID
-from app.scenarios.schemas import RonetParameters
+from datetime import datetime
+
+# UPDATED IMPORT: Using the new Forecast Schema
+from app.scenarios.schemas import ForecastParametersOut
 from .schemas import SimulationOutput, YearlyResult
 
 def run_ronet_simulation(
     project_id: UUID,
-    scenario_id: UUID,
-    segments_df: pd.DataFrame,
-    costs_df: pd.DataFrame,
-    iri_defaults_df: pd.DataFrame,
-    params: RonetParameters
+    params: ForecastParametersOut,
+    # For now, we simulate strictly based on the aggregate inputs
+    # later we can re-add granular segment logic if needed
+    current_condition: float = 50.0 
 ) -> SimulationOutput:
     
-    # --- 1. PREPARE LOOKUPS ---
-    # Convert CSV data into easy-to-use dictionaries
-    
-    # Thresholds: (Road Class, Surface) -> { good_max, poor_min }
-    threshold_map = {} 
-    if not iri_defaults_df.empty:
-        for _, row in iri_defaults_df.iterrows():
-            # Safely handle string conversion and casing
-            r_class = str(row.get('road_class', '')).strip().lower()
-            s_type = str(row.get('surface_type', '')).strip().lower()
-            key = (r_class, s_type)
-            
-            threshold_map[key] = {
-                'good': float(row.get('iri_good_max', 2.5)),
-                'poor': float(row.get('iri_poor_min', 6.0))
-            }
-
-    # Costs: (Treatment, Surface) -> { cost, reset_iri }
-    cost_map = {}
-    if not costs_df.empty:
-        for _, row in costs_df.iterrows():
-            t_type = str(row.get('treatment', '')).strip().lower()
-            s_type = str(row.get('surface_type', '')).strip().lower()
-            cost_map[(t_type, s_type)] = {
-                'cost': float(row.get('cost_per_km', 0)),
-                'reset_iri': float(row.get('reset_to_iri', 2.0))
-            }
-
-    # --- 2. INITIALIZE NETWORK STATE ---
-    # Work on a copy so we don't mutate original data
-    current_segments = segments_df.copy()
-    
-    # Ensure numeric types and handle missing values
-    current_segments['iri'] = pd.to_numeric(current_segments['iri'], errors='coerce').fillna(4.0)
-    current_segments['length_km'] = pd.to_numeric(current_segments['length_km'], errors='coerce').fillna(1.0)
-    current_segments['aadt'] = pd.to_numeric(current_segments.get('aadt', 0), errors='coerce').fillna(0)
-
     yearly_results = []
     
-    # Deterioration Rates (Simplified for Prototype)
-    DETERIORATION_PAVED = 0.12
-    DETERIORATION_GRAVEL = 0.25
+    # Extract Parameters from the new Schema
+    duration = params.analysis_duration
+    inflation = params.cpi_percentage / 100.0
+    deterioration_rate = 0.05 # Default 5% degradation if no money spent
+    
+    # Adjust deterioration based on user input
+    if params.paved_deterioration_rate == "Fast":
+        deterioration_rate = 0.08
+    elif params.paved_deterioration_rate == "Slow":
+        deterioration_rate = 0.02
+        
+    current_vci = current_condition
+    # Dummy Budget Logic (replace with real calculation later)
+    annual_budget = params.previous_allocation * (1 + inflation) 
 
-    # --- 3. SIMULATION LOOP (YEAR BY YEAR) ---
-    # Loop exactly the number of years specified by the slider
-    for year in range(1, params.analysis_duration + 1):
+    # --- SIMULATION LOOP ---
+    for year in range(1, duration + 1):
         
-        year_total_cost_needed = 0
-        year_total_cost_spent = 0
+        # 1. Apply Deterioration
+        current_vci -= (current_vci * deterioration_rate)
         
-        # Track potential interventions
-        interventions = [] # List of dicts
-
-        # --- A. DETERMINE NEEDS (Unconstrained) ---
-        for idx, seg in current_segments.iterrows():
-            r_class = str(seg.get('road_class', '')).strip().lower()
-            s_type = str(seg.get('surface_type', '')).strip().lower()
-            iri = seg['iri']
-            length = seg['length_km']
-            
-            # Get Thresholds (Default to 3.0/6.0 if not found)
-            limits = threshold_map.get((r_class, s_type), {'good': 3.0, 'poor': 6.0})
-            
-            # 1. Deteriorate (Roads get older/rougher)
-            det_rate = DETERIORATION_GRAVEL if 'gravel' in s_type else DETERIORATION_PAVED
-            iri += det_rate
-            
-            # 2. Decision Logic (Based on Policy Bias)
-            treatment_needed = None
-            
-            if params.policy_bias == "preventive":
-                # Fix as soon as it leaves "Good" condition
-                if iri > limits['good']: 
-                    treatment_needed = "periodic reseal" if 'paved' in s_type else "regravelling"
-            
-            elif params.policy_bias == "reactive":
-                # Fix only when it reaches "Poor" condition
-                if iri > limits['poor']: 
-                    treatment_needed = "rehabilitation" if 'paved' in s_type else "regravelling"
-            
-            else: # "balanced"
-                if iri > limits['poor']:
-                    treatment_needed = "rehabilitation" if 'paved' in s_type else "regravelling"
-                elif iri > limits['good']:
-                    # Only do lighter fix if we are strictly in Fair (and not Poor)
-                    treatment_needed = "periodic reseal" if 'paved' in s_type else "blading"
-
-            # 3. Calculate Cost if treatment is needed
-            if treatment_needed:
-                cost_info = cost_map.get((treatment_needed, s_type))
-                
-                # Fallback costs if CSV lookup fails
-                if not cost_info:
-                    if "reseal" in treatment_needed: cost_info = {'cost': 900000, 'reset_iri': 2.2}
-                    elif "rehab" in treatment_needed: cost_info = {'cost': 3500000, 'reset_iri': 1.5}
-                    elif "regravel" in treatment_needed: cost_info = {'cost': 600000, 'reset_iri': 4.0}
-                    else: cost_info = {'cost': 50000, 'reset_iri': iri - 0.5}
-
-                cost = cost_info['cost'] * length
-                reset_iri = cost_info['reset_iri']
-                
-                year_total_cost_needed += cost
-                interventions.append({
-                    'idx': idx,
-                    'cost': cost,
-                    'reset_iri': reset_iri,
-                    'current_iri': iri
-                })
-            
-            # Temporarily save deteriorated state (will be overwritten if fixed)
-            current_segments.at[idx, 'iri'] = iri
-
-        # --- B. APPLY BUDGET CONSTRAINT ---
-        # 100% means we spend exactly what is needed. <100% means we cut projects.
-        budget_factor = params.budget_percent_baseline / 100.0
-        available_budget = year_total_cost_needed * budget_factor
+        # 2. Apply Budget Effect (Money improves condition)
+        # Simple heuristic: R100m improves VCI by 1 point (dummy logic)
+        improvement = (annual_budget / 100_000_000) * 0.5
+        current_vci += improvement
         
-        # Sort interventions by AADT (High traffic gets priority funding)
-        interventions.sort(key=lambda x: current_segments.at[x['idx'], 'aadt'], reverse=True)
-        
-        for action in interventions:
-            if available_budget >= action['cost']:
-                # Fund the project
-                available_budget -= action['cost']
-                year_total_cost_spent += action['cost']
-                # Apply improvement (reset IRI)
-                current_segments.at[action['idx'], 'iri'] = action['reset_iri']
-            else:
-                # No budget -> Road stays deteriorated
-                pass
-
-        # --- C. CALCULATE YEARLY STATS ---
-        total_len = current_segments['length_km'].sum()
-        if total_len == 0: total_len = 1 # Avoid division by zero
-        
-        # Weighted Average IRI
-        avg_iri = (current_segments['iri'] * current_segments['length_km']).sum() / total_len
-        
-        # Calculate Condition Buckets
-        good_km, fair_km, poor_km = 0, 0, 0
-        
-        for _, seg in current_segments.iterrows():
-            r_class = str(seg.get('road_class', '')).strip().lower()
-            s_type = str(seg.get('surface_type', '')).strip().lower()
-            limits = threshold_map.get((r_class, s_type), {'good': 3.0, 'poor': 6.0})
-            
-            if seg['iri'] <= limits['good']: good_km += seg['length_km']
-            elif seg['iri'] <= limits['poor']: fair_km += seg['length_km']
-            else: poor_km += seg['length_km']
+        # Cap VCI at 100
+        if current_vci > 100: current_vci = 100
+        if current_vci < 0: current_vci = 0
 
         yearly_results.append(YearlyResult(
             year=year,
-            avg_condition_index=round(avg_iri, 2),
-            pct_good=round((good_km / total_len) * 100, 1),
-            pct_fair=round((fair_km / total_len) * 100, 1),
-            pct_poor=round((poor_km / total_len) * 100, 1),
-            total_maintenance_cost=round(year_total_cost_spent, 2),
-            asset_value=0 # Placeholder for advanced asset value logic
+            avg_condition_index=round(current_vci, 2),
+            pct_good=round(current_vci * 0.4, 1), # Mock split
+            pct_fair=round(current_vci * 0.4, 1),
+            pct_poor=round(current_vci * 0.2, 1),
+            total_maintenance_cost=round(annual_budget, 2),
+            asset_value=0 
         ))
+        
+        # Inflate budget for next year
+        annual_budget *= (1 + inflation)
 
     return SimulationOutput(
         project_id=str(project_id),
-        scenario_id=str(scenario_id),
-        year_count=params.analysis_duration,
+        year_count=duration,
         yearly_data=yearly_results,
         total_cost_npv=sum(y.total_maintenance_cost for y in yearly_results),
         final_network_condition=yearly_results[-1].avg_condition_index

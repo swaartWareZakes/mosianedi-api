@@ -1,110 +1,95 @@
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
-from app.routers.projects import get_db_connection, get_current_user_id
+from typing import Dict, Any
 
-from .schemas import ProposalDataPayload, ProposalDataResponse
-from .validation import validate_or_raise, ProposalValidationError
-from .service import compute_paved_total, compute_gravel_total
-from . import repository
+from app.routers.projects import get_current_user_id, get_db_connection
+from .schemas import ProposalDataOut, ProposalDataPatch
 
 router = APIRouter()
 
-@router.get("/{project_id}/proposal-data", response_model=ProposalDataResponse)
-def read_proposal_data(project_id: str, user_id: str = Depends(get_current_user_id)):
+def _row_to_dict(cur, row) -> Dict[str, Any]:
+    cols = [desc[0] for desc in cur.description]
+    return dict(zip(cols, row))
+
+def _ensure_row(project_id: UUID, user_id: str) -> None:
+    sql = """
+        INSERT INTO public.proposal_data (project_id, user_id, data_source)
+        VALUES (%s, %s, 'manual')
+        ON CONFLICT (project_id) DO NOTHING;
+    """
     with get_db_connection() as conn:
-        row = repository.get_proposal_data(conn, project_id, user_id)
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), user_id))
+        conn.commit()
 
-        # If not created yet, return empty defaults (UI can show empty form)
-        if row is None:
-            payload = ProposalDataPayload()
-            paved_total = compute_paved_total(payload)
-            gravel_total = compute_gravel_total(payload)
-            return ProposalDataResponse(
-                project_id=project_id,
-                user_id=user_id,
-                paved_total_lane_km=paved_total,
-                gravel_total_lane_km=gravel_total,
-                total_lane_km=paved_total + gravel_total,
-                payload=payload,
-                updated_at=None,
-            )
+@router.get(
+    "/{project_id}/proposal-data",
+    response_model=ProposalDataOut,
+    summary="Get proposal inputs for a project",
+)
+def get_proposal_data(project_id: UUID, user_id: str = Depends(get_current_user_id)):
+    # ensure row exists (covers old projects)
+    _ensure_row(project_id, user_id)
 
-        payload = ProposalDataPayload(
-            paved_arid=float(row["paved_arid"] or 0),
-            paved_semi_arid=float(row["paved_semi_arid"] or 0),
-            paved_dry_sub_humid=float(row["paved_dry_sub_humid"] or 0),
-            paved_moist_sub_humid=float(row["paved_moist_sub_humid"] or 0),
-            paved_humid=float(row["paved_humid"] or 0),
-            gravel_arid=float(row["gravel_arid"] or 0),
-            gravel_semi_arid=float(row["gravel_semi_arid"] or 0),
-            gravel_dry_sub_humid=float(row["gravel_dry_sub_humid"] or 0),
-            gravel_moist_sub_humid=float(row["gravel_moist_sub_humid"] or 0),
-            gravel_humid=float(row["gravel_humid"] or 0),
-            avg_vci_used=float(row["avg_vci_used"] or 0),
-            vehicle_km=float(row["vehicle_km"] or 0),
-            pct_vehicle_km_used=float(row["pct_vehicle_km_used"] or 0),
-            fuel_sales=float(row["fuel_sales"] or 0),
-            pct_fuel_sales_used=float(row["pct_fuel_sales_used"] or 0),
-            fuel_option_selected=int(row["fuel_option_selected"] or 1),
-            target_vci=float(row["target_vci"] or 45),
-            extra_inputs=row.get("extra_inputs") or {},
-        )
+    sql = """
+        SELECT *
+        FROM public.proposal_data
+        WHERE project_id = %s AND user_id = %s
+        LIMIT 1;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), user_id))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "proposal_data row not found after ensure (unexpected).")
+            return _row_to_dict(cur, row)
 
-        paved_total = compute_paved_total(payload)
-        gravel_total = compute_gravel_total(payload)
+@router.patch(
+    "/{project_id}/proposal-data",
+    response_model=ProposalDataOut,
+    summary="Update proposal inputs for a project",
+)
+def patch_proposal_data(
+    project_id: UUID,
+    payload: ProposalDataPatch,
+    user_id: str = Depends(get_current_user_id),
+):
+    # ensure row exists (covers old projects)
+    _ensure_row(project_id, user_id)
 
-        return ProposalDataResponse(
-            project_id=project_id,
-            user_id=user_id,
-            paved_total_lane_km=paved_total,
-            gravel_total_lane_km=gravel_total,
-            total_lane_km=paved_total + gravel_total,
-            payload=payload,
-            updated_at=row.get("updated_at"),
-        )
+    data = payload.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(400, "No fields provided")
 
-@router.put("/{project_id}/proposal-data", response_model=ProposalDataResponse)
-def save_proposal_data(project_id: str, body: ProposalDataPayload, user_id: str = Depends(get_current_user_id)):
-    try:
-        validate_or_raise(body)
-    except ProposalValidationError as e:
-        raise HTTPException(status_code=422, detail={"errors": e.errors})
+    set_parts = []
+    values = []
+    for k, v in data.items():
+        set_parts.append(f"{k} = %s")
+        values.append(v)
 
-    payload_dict = body.model_dump()
+    set_clause = ", ".join(set_parts)
+
+    sql = f"""
+        UPDATE public.proposal_data
+        SET {set_clause}, updated_at = now()
+        WHERE project_id = %s AND user_id = %s
+        RETURNING *;
+    """
 
     with get_db_connection() as conn:
-        saved = repository.upsert_proposal_data(conn, project_id, user_id, payload_dict)
-
-        # rebuild payload from saved row
-        payload = ProposalDataPayload(
-            paved_arid=float(saved["paved_arid"] or 0),
-            paved_semi_arid=float(saved["paved_semi_arid"] or 0),
-            paved_dry_sub_humid=float(saved["paved_dry_sub_humid"] or 0),
-            paved_moist_sub_humid=float(saved["paved_moist_sub_humid"] or 0),
-            paved_humid=float(saved["paved_humid"] or 0),
-            gravel_arid=float(saved["gravel_arid"] or 0),
-            gravel_semi_arid=float(saved["gravel_semi_arid"] or 0),
-            gravel_dry_sub_humid=float(saved["gravel_dry_sub_humid"] or 0),
-            gravel_moist_sub_humid=float(saved["gravel_moist_sub_humid"] or 0),
-            gravel_humid=float(saved["gravel_humid"] or 0),
-            avg_vci_used=float(saved["avg_vci_used"] or 0),
-            vehicle_km=float(saved["vehicle_km"] or 0),
-            pct_vehicle_km_used=float(saved["pct_vehicle_km_used"] or 0),
-            fuel_sales=float(saved["fuel_sales"] or 0),
-            pct_fuel_sales_used=float(saved["pct_fuel_sales_used"] or 0),
-            fuel_option_selected=int(saved["fuel_option_selected"] or 1),
-            target_vci=float(saved["target_vci"] or 45),
-            extra_inputs=saved.get("extra_inputs") or {},
-        )
-
-        paved_total = compute_paved_total(payload)
-        gravel_total = compute_gravel_total(payload)
-
-        return ProposalDataResponse(
-            project_id=project_id,
-            user_id=user_id,
-            paved_total_lane_km=paved_total,
-            gravel_total_lane_km=gravel_total,
-            total_lane_km=paved_total + gravel_total,
-            payload=payload,
-            updated_at=saved.get("updated_at"),
-        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, (*values, str(project_id), user_id))
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(404, "proposal_data row not found for this project/user")
+                conn.commit()
+                return _row_to_dict(cur, row)
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(500, f"Failed to update proposal_data: {str(e)}")
+        
