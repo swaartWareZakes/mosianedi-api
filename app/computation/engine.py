@@ -3,62 +3,65 @@ import numpy as np
 from uuid import UUID
 from datetime import datetime
 
-# UPDATED IMPORT: Using the new Forecast Schema
 from app.scenarios.schemas import ForecastParametersOut
-from .schemas import SimulationOutput, YearlyResult
+from .schemas import SimulationOutput, YearlyResult, SimulationRunOptions
 
 def run_ronet_simulation(
     project_id: UUID,
     params: ForecastParametersOut,
-    # For now, we simulate strictly based on the aggregate inputs
-    # later we can re-add granular segment logic if needed
-    current_condition: float = 50.0 
+    network_profile: dict, 
+    options: SimulationRunOptions
 ) -> SimulationOutput:
     
     yearly_results = []
     
-    # Extract Parameters from the new Schema
-    duration = params.analysis_duration
-    inflation = params.cpi_percentage / 100.0
-    deterioration_rate = 0.05 # Default 5% degradation if no money spent
+    # 1. Determine Scope (Using new snake_case names)
+    paved_km = network_profile.get("pavedLengthKm", 0) if options.include_paved else 0
+    gravel_km = network_profile.get("gravelLengthKm", 0) if options.include_gravel else 0
     
-    # Adjust deterioration based on user input
-    if params.paved_deterioration_rate == "Fast":
-        deterioration_rate = 0.08
-    elif params.paved_deterioration_rate == "Slow":
-        deterioration_rate = 0.02
-        
-    current_vci = current_condition
-    # Dummy Budget Logic (replace with real calculation later)
-    annual_budget = params.previous_allocation * (1 + inflation) 
+    # 2. Setup Time
+    duration = params.analysis_duration
+    # Note: accessing .start_year_override (Python friendly)
+    start_year = options.start_year_override or (datetime.now().year + 1)
+    
+    # 3. Setup Financials
+    inflation = params.cpi_percentage / 100.0
+    
+    # --- ENGINEERING LOGIC ---
+    base_need_paved = paved_km * 160_000 
+    base_need_gravel = gravel_km * 45_000
+    
+    total_annual_need_today = base_need_paved + base_need_gravel
+    current_vci = network_profile.get("avgVci", 50)
+    current_asset_value = network_profile.get("assetValue", 0)
 
     # --- SIMULATION LOOP ---
-    for year in range(1, duration + 1):
+    for i in range(duration):
+        year = start_year + i
         
-        # 1. Apply Deterioration
-        current_vci -= (current_vci * deterioration_rate)
+        # A. Apply Inflation
+        year_inflation_factor = (1 + inflation) ** i
+        nominal_cost_needed = total_annual_need_today * year_inflation_factor
         
-        # 2. Apply Budget Effect (Money improves condition)
-        # Simple heuristic: R100m improves VCI by 1 point (dummy logic)
-        improvement = (annual_budget / 100_000_000) * 0.5
-        current_vci += improvement
-        
-        # Cap VCI at 100
-        if current_vci > 100: current_vci = 100
-        if current_vci < 0: current_vci = 0
+        # B. Simulate Condition Change
+        if (paved_km + gravel_km) > 0:
+            # Funded
+            improvement = 0.8 
+            current_vci = min(100, current_vci + improvement)
+            current_asset_value *= (1 + (inflation * 0.5))
+        else:
+            # Unfunded / Not Selected
+            current_vci = max(0, current_vci - 2.5)
 
         yearly_results.append(YearlyResult(
             year=year,
             avg_condition_index=round(current_vci, 2),
-            pct_good=round(current_vci * 0.4, 1), # Mock split
-            pct_fair=round(current_vci * 0.4, 1),
-            pct_poor=round(current_vci * 0.2, 1),
-            total_maintenance_cost=round(annual_budget, 2),
-            asset_value=0 
+            pct_good=round(current_vci * 0.45, 1),
+            pct_fair=round(current_vci * 0.35, 1),
+            pct_poor=round(current_vci * 0.20, 1),
+            total_maintenance_cost=round(nominal_cost_needed, 2),
+            asset_value=round(current_asset_value, 2)
         ))
-        
-        # Inflate budget for next year
-        annual_budget *= (1 + inflation)
 
     return SimulationOutput(
         project_id=str(project_id),
