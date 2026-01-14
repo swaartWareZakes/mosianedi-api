@@ -27,6 +27,8 @@ from app.network_snapshot.router import router as network_snapshot_router
 from app.scenarios.router import router as scenarios_router
 from app.computation.router import router as computation_router
 
+
+from app.ai_advisor import router as ai_router
 # Dashboards (Uncomment when ready)
 # from app.dashboards.router import router as dashboards_router 
 
@@ -89,6 +91,12 @@ app.include_router(
     computation_router,
     prefix="/api/v1/projects",
     tags=["Computation Engine"]
+)
+
+app.include_router(
+    ai_router.router, 
+    prefix="/api/v1/projects", 
+    tags=["AI Advisor"]
 )
 
 # F. Dashboards (Future)
