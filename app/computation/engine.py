@@ -14,12 +14,7 @@ def run_ronet_simulation(
     options: SimulationRunOptions,
 ) -> SimulationOutput:
     """
-    Enhanced RoNET-style simulation for Treasury Demo.
-
-    Key Features:
-    1. Accelerated Deterioration: Poor roads degrade faster than good roads.
-    2. Funding Gap Impact: If you underfund, condition drops proportional to the gap.
-    3. NPV Calculation: Uses real discount rates for accurate financial reporting.
+    Enhanced RoNET-style simulation.
     """
 
     yearly_results = []
@@ -36,7 +31,7 @@ def run_ronet_simulation(
     inflation = float(getattr(params, "cpi_percentage", 6.0) or 6.0) / 100.0
     discount_rate = float(getattr(params, "discount_rate", 8.0) or 8.0) / 100.0
 
-    # 4) Engineering Baselines (Unit Costs - localized for South Africa context)
+    # 4) Unit Costs
     UNIT_COST_PAVED = 160_000
     UNIT_COST_GRAVEL = 45_000
 
@@ -45,6 +40,10 @@ def run_ronet_simulation(
     # Initial States
     current_vci = float(network_profile.get("avgVci", 50) or 50)
     current_asset_value = float(network_profile.get("assetValue", 0) or 0)
+    
+    # Recalculate asset value if it's missing but we have km
+    if current_asset_value == 0 and (paved_km > 0 or gravel_km > 0):
+         current_asset_value = (paved_km * 3500000) + (gravel_km * 250000)
 
     cumulative_npv = 0.0
 
@@ -52,11 +51,11 @@ def run_ronet_simulation(
         year = start_year + i
         year_inflation_factor = (1 + inflation) ** i
 
-        # A) Determine Demand (Need)
+        # A) Determine Demand
         condition_cost_factor = 1.0 + ((100 - current_vci) / 100.0)
         nominal_need = base_annual_need * condition_cost_factor * year_inflation_factor
 
-        # B) Determine Actual Spend (Budget)
+        # B) Determine Actual Spend
         is_do_nothing = (paved_km + gravel_km) == 0
         actual_spend = 0.0 if is_do_nothing else nominal_need
 
@@ -64,7 +63,7 @@ def run_ronet_simulation(
         if is_do_nothing:
             decay_rate = 3.5 if current_vci > 50 else 5.0
             current_vci = max(0.0, current_vci - decay_rate)
-            current_asset_value *= (1 - 0.04)  # lose 4% per year
+            current_asset_value *= (1 - 0.04) 
         else:
             improvement = 2.5
             current_vci = min(95.0, current_vci + improvement)
@@ -75,7 +74,7 @@ def run_ronet_simulation(
         year_npv = actual_spend / discount_factor
         cumulative_npv += year_npv
 
-        # E) Distributions for charts
+        # E) Distributions
         pct_good = max(0.0, min(100.0, (current_vci - 30) * 1.5))
         pct_poor = max(0.0, min(100.0, (70 - current_vci) * 1.5))
         pct_fair = max(0.0, 100.0 - pct_good - pct_poor)
