@@ -398,19 +398,20 @@ async def get_master_data_preview(
         print("[PREVIEW] Pandas error:", e)
         raise HTTPException(500, f"Error processing preview: {str(e)}")--- ./routers/projects.py ---
 from fastapi import APIRouter, HTTPException, Depends, Header
-from decimal import Decimal
 import os
 import psycopg2
 from contextlib import contextmanager
-from jose import jwt, JWTError
-from uuid import UUID  # <--- THIS WAS MISSING
+from jose import jwt
+from uuid import UUID
+from typing import List, Dict, Any
 
-from app.db.schemas import ProjectMetadata, ProjectDB 
+from app.db.schemas import ProjectMetadata, ProjectDB
 
 router = APIRouter()
 
 JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 ALGORITHM = "HS256"
+
 
 @contextmanager
 def get_db_connection():
@@ -426,78 +427,132 @@ def get_db_connection():
         if conn:
             conn.close()
 
+
 def get_current_user_id(authorization: str = Header(None)) -> str:
     if not authorization:
         raise HTTPException(401, "Authorization header missing")
     try:
         scheme, token = authorization.split()
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM], options={"verify_aud": False})
-        return payload.get("sub")
-    except:
+        if scheme.lower() != "bearer":
+            raise HTTPException(401, "Invalid auth scheme (expected Bearer)")
+
+        payload = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=[ALGORITHM],
+            options={"verify_aud": False},
+        )
+        sub = payload.get("sub")
+        if not sub:
+            raise HTTPException(401, "Invalid token (sub missing)")
+        return sub
+
+    except HTTPException:
+        raise
+    except Exception:
         raise HTTPException(401, "Invalid token")
 
+
+def _row_to_dict(cur, row) -> Dict[str, Any]:
+    cols = [desc[0] for desc in cur.description]
+    return dict(zip(cols, row))
+
+
+# -------------------------------------------------------------------
+# CREATE PROJECT (Proposal container) + initialize proposal_data row
+# -------------------------------------------------------------------
 @router.post("/", status_code=201)
-async def create_project(metadata: ProjectMetadata, user_id: str = Depends(get_current_user_id)):
-    sql = """
-        INSERT INTO public.projects 
-        (user_id, project_name, description, start_year, forecast_duration, discount_rate)
-        VALUES (%s, %s, %s, %s, %s, %s)
+async def create_project(
+    metadata: ProjectMetadata,
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Creates a project (proposal container) and immediately creates an empty proposal_data row (Option A).
+    """
+
+    sql_project = """
+        INSERT INTO public.projects (user_id, project_name, province, start_year)
+        VALUES (%s, %s, %s, %s)
         RETURNING id, created_at;
     """
 
-    data = (
-        user_id,
-        metadata.project_name,
-        metadata.description,
-        metadata.start_year,
-        metadata.forecast_duration,
-        Decimal(str(metadata.discount_rate)),
-    )
+    sql_proposal = """
+        INSERT INTO public.proposal_data (project_id, user_id, data_source)
+        VALUES (%s, %s, 'manual')
+        ON CONFLICT (project_id) DO NOTHING;
+    """
 
     with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, data)
-            project_id, created_at = cur.fetchone()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql_project,
+                    (user_id, metadata.project_name, metadata.province, metadata.start_year),
+                )
+                project_id, created_at = cur.fetchone()
+
+                cur.execute(sql_proposal, (str(project_id), user_id))
+
             conn.commit()
+
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to create project: {str(e)}")
 
     return {
         "project_id": str(project_id),
-        "message": "Project created",
+        "message": "Project created (proposal_data initialized)",
         "created_at": created_at.isoformat(),
     }
-    
-@router.get(
-    "/{project_id}",
-    response_model=ProjectDB,
-    summary="Get details of a specific project",
-)
-def get_project(
-    project_id: UUID,
-    user_id: str = Depends(get_current_user_id),
-):
+
+
+# -------------------------------------------------------------------
+# GET ONE PROJECT
+# -------------------------------------------------------------------
+@router.get("/{project_id}", response_model=ProjectDB)
+def get_project(project_id: UUID, user_id: str = Depends(get_current_user_id)):
     sql = """
-        SELECT * FROM public.projects
+        SELECT
+          id,
+          user_id,
+          project_name,
+          province,
+          start_year,
+          proposal_title,
+          proposal_status,
+          created_at,
+          updated_at
+        FROM public.projects
         WHERE id = %s AND user_id = %s;
     """
+
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (str(project_id), user_id))
             row = cur.fetchone()
-            
+
             if not row:
                 raise HTTPException(status_code=404, detail="Project not found")
-                
-            # Convert row to dict
-            cols = [desc[0] for desc in cur.description]
-            return dict(zip(cols, row))
-        
-        
 
-@router.get("/", response_model=list[ProjectDB])
+            return _row_to_dict(cur, row)
+
+
+# -------------------------------------------------------------------
+# LIST PROJECTS
+# -------------------------------------------------------------------
+@router.get("/", response_model=List[ProjectDB])
 async def list_projects(user_id: str = Depends(get_current_user_id)):
     sql = """
-        SELECT id, user_id, project_name, description, start_year, forecast_duration, 
-               discount_rate, created_at, updated_at
+        SELECT
+          id,
+          user_id,
+          project_name,
+          province,
+          start_year,
+          proposal_title,
+          proposal_status,
+          created_at,
+          updated_at
         FROM public.projects
         WHERE user_id = %s
         ORDER BY created_at DESC;
@@ -506,728 +561,231 @@ async def list_projects(user_id: str = Depends(get_current_user_id)):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (user_id,))
-            columns = [c[0] for c in cur.description]
             rows = cur.fetchall()
-
-    projects = []
-    for row in rows:
-        d = dict(zip(columns, row))
-        if isinstance(d["discount_rate"], Decimal):
-            d["discount_rate"] = float(d["discount_rate"])
-        projects.append(d)
-
-    return projects--- ./__init__.py ---
+            return [_row_to_dict(cur, r) for r in rows]
+        
+        --- ./__init__.py ---
 --- ./network_snapshot/service.py ---
-# app/network_snapshot/service.py
-
 from uuid import UUID
-from typing import Optional, Tuple, Any, List, Dict
-
-import json
-import pandas as pd
-from fastapi import HTTPException
-
+from typing import Dict, Any
 from app.routers.projects import get_db_connection
-from app.master_data.validation import parse_master_data_file  # fallback for legacy uploads
-from .schemas import (
-    NetworkSnapshot,
-    LengthByCategory,
-    AssetValueByCategory,
-    UnitCostByCategory,
-)
 
+def _n(x) -> float:
+    """Helper to convert None to 0.0"""
+    return float(x or 0)
 
-# -------------------------------------------------
-# DB helper: latest upload record + workbook blob
-# -------------------------------------------------
-
-
-def _fetch_latest_master_data_record(
-    project_id: UUID,
-    user_id: str,
-) -> Tuple[UUID, Optional[Dict[str, Any]], Optional[bytes], Optional[str]]:
-    """
-    Fetch the latest master_data_uploads row for this project+user.
-
-    Returns:
-        upload_id,
-        workbook_payload (dict or None),
-        file_bytes (from file_blob, or None),
-        original_filename (or None)
-    """
+def get_network_snapshot(project_id: UUID, user_id: str) -> Dict[str, Any]:
+    # 1. Fetch Proposal Inputs
     sql = """
-        SELECT
-            id,
-            workbook_payload,
-            file_blob,
-            original_filename
-        FROM public.master_data_uploads
+        SELECT 
+            paved_arid, paved_semi_arid, paved_dry_sub_humid, paved_moist_sub_humid, paved_humid,
+            gravel_arid, gravel_semi_arid, gravel_dry_sub_humid, gravel_moist_sub_humid, gravel_humid,
+            avg_vci_used, vehicle_km, fuel_sales
+        FROM public.proposal_data
         WHERE project_id = %s AND user_id = %s
-        ORDER BY created_at DESC
-        LIMIT 1;
     """
-
+    
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (str(project_id), user_id))
             row = cur.fetchone()
-
+            
+            # If no data found, return zeros
             if not row:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No master data uploads found for this project.",
-                )
+                return {
+                    "totalLengthKm": 0, "pavedLengthKm": 0, "gravelLengthKm": 0,
+                    "avgVci": 0, "assetValue": 0, "totalVehicleKm": 0, "fuelSales": 0
+                }
+                
+            data = dict(zip([d[0] for d in cur.description], row))
 
-            upload_id, workbook_payload_raw, file_blob_raw, original_filename = row
-
-            # workbook_payload is usually a dict (psycopg2 Json), but be defensive
-            workbook_payload: Optional[Dict[str, Any]] = None
-            if workbook_payload_raw is not None:
-                if isinstance(workbook_payload_raw, dict):
-                    workbook_payload = workbook_payload_raw
-                else:
-                    try:
-                        workbook_payload = json.loads(workbook_payload_raw)
-                    except Exception:
-                        workbook_payload = None
-
-            # Convert file_blob to bytes if present
-            file_bytes: Optional[bytes] = None
-            if file_blob_raw is not None:
-                if isinstance(file_blob_raw, memoryview):
-                    file_bytes = file_blob_raw.tobytes()
-                else:
-                    file_bytes = file_blob_raw
-
-            return upload_id, workbook_payload, file_bytes, original_filename
-
-
-# -------------------------------------------------
-# Generic helpers
-# -------------------------------------------------
-
-
-def _compute_length_breakdown(
-    df: pd.DataFrame,
-    column: str,
-) -> List[LengthByCategory]:
-    """
-    Group by a categorical column (e.g. road_class, surface_type)
-    and sum length_km.
-    """
-    if column not in df.columns or "length_km" not in df.columns:
-        return []
-
-    grouped = (
-        df.groupby(column)["length_km"]
-        .sum()
-        .reset_index()
-        .sort_values("length_km", ascending=False)
+    # 2. Sum up lengths
+    paved_total = (
+        _n(data.get("paved_arid")) + _n(data.get("paved_semi_arid")) + 
+        _n(data.get("paved_dry_sub_humid")) + _n(data.get("paved_moist_sub_humid")) + _n(data.get("paved_humid"))
     )
-
-    results: List[LengthByCategory] = []
-    for _, row in grouped.iterrows():
-        label = str(row[column])
-        length = float(row["length_km"] or 0)
-        results.append(LengthByCategory(label=label, length_km=length))
-
-    return results
-
-
-def _get_segments_df_from_workbook(
-    workbook_payload: Dict[str, Any]
-) -> Optional[pd.DataFrame]:
-    """
-    Build a DataFrame from workbook_payload['segments'] if present.
-    """
-    segments = workbook_payload.get("segments")
-    if not segments:
-        return None
-
-    df = pd.DataFrame(segments)
-    df.columns = [str(c).strip().lower() for c in df.columns]
-
-    if "length_km" in df.columns:
-        df["length_km"] = pd.to_numeric(df["length_km"], errors="coerce").fillna(0)
-
-    return df
-
-
-def _get_sheet_df(
-    workbook_payload: Dict[str, Any],
-    sheet_name: str,
-) -> Optional[pd.DataFrame]:
-    """
-    Small helper: safely convert a workbook sheet to DataFrame.
-    """
-    if not workbook_payload or sheet_name not in workbook_payload:
-        return None
-
-    data = workbook_payload.get(sheet_name)
-    if not data:
-        return None
-
-    df = pd.DataFrame(data)
-    df.columns = [str(c).strip().lower() for c in df.columns]
-    return df
-
-
-def _find_first_numeric_column(
-    df: pd.DataFrame,
-    preferred_names: List[str],
-) -> Optional[str]:
-    """
-    Tries a list of preferred column names; if none exist, picks
-    the first numeric column, else None.
-    """
-    cols = set(df.columns)
-
-    for name in preferred_names:
-        if name in cols:
-            return name
-
-    # Fallback: any numeric-looking column
-    numeric_cols = df.select_dtypes(include=["number"]).columns
-    if len(numeric_cols) > 0:
-        return numeric_cols[0]
-
-    # Try to coerce object columns
-    for col in df.columns:
-        try:
-            pd.to_numeric(df[col], errors="raise")
-            return col
-        except Exception:
-            continue
-
-    return None
-
-
-# -------------------------------------------------
-# Extra metrics by sheet
-# -------------------------------------------------
-
-
-def _compute_network_length_metrics(
-    workbook_payload: Optional[Dict[str, Any]],
-) -> tuple[Optional[float], List[LengthByCategory]]:
-    """
-    Use 'network_length' sheet if present.
-    """
-    if not workbook_payload:
-        return None, []
-
-    df = _get_sheet_df(workbook_payload, "network_length")
-    if df is None or df.empty:
-        return None, []
-
-    # Ensure numeric length column
-    length_col = _find_first_numeric_column(
-        df,
-        preferred_names=["length_km", "network_length_km", "length"],
+    
+    gravel_total = (
+        _n(data.get("gravel_arid")) + _n(data.get("gravel_semi_arid")) + 
+        _n(data.get("gravel_dry_sub_humid")) + _n(data.get("gravel_moist_sub_humid")) + _n(data.get("gravel_humid"))
     )
-    if not length_col:
-        return None, []
+    
+    total_km = paved_total + gravel_total
 
-    df[length_col] = pd.to_numeric(df[length_col], errors="coerce").fillna(0)
+    # 3. Calculate Asset Value (CRC)
+    # Using standard engineering estimates (adjust as needed)
+    RATE_PAVED = 3_500_000   # R3.5m per km
+    RATE_GRAVEL = 250_000    # R250k per km
+    
+    asset_value = (paved_total * RATE_PAVED) + (gravel_total * RATE_GRAVEL)
 
-    total_network_length_km = float(df[length_col].sum())
-
-    # Category for breakdown – try a few expected options
-    category_col = None
-    for candidate in ["network_type", "road_class", "surface_type"]:
-        if candidate in df.columns:
-            category_col = candidate
-            break
-
-    length_by_network_type: List[LengthByCategory] = []
-    if category_col:
-        grouped = (
-            df.groupby(category_col)[length_col]
-            .sum()
-            .reset_index()
-            .sort_values(length_col, ascending=False)
-        )
-        for _, row in grouped.iterrows():
-            label = str(row[category_col])
-            length = float(row[length_col] or 0)
-            length_by_network_type.append(
-                LengthByCategory(label=label, length_km=length)
-            )
-
-    return total_network_length_km, length_by_network_type
-
-
-def _compute_asset_value_metrics(
-    workbook_payload: Optional[Dict[str, Any]],
-) -> tuple[Optional[float], List[AssetValueByCategory]]:
-    """
-    Use 'asset_value' sheet if present.
-    """
-    if not workbook_payload:
-        return None, []
-
-    df = _get_sheet_df(workbook_payload, "asset_value")
-    if df is None or df.empty:
-        return None, []
-
-    value_col = _find_first_numeric_column(
-        df,
-        preferred_names=["asset_value", "value", "total_value"],
-    )
-    if not value_col:
-        return None, []
-
-    df[value_col] = pd.to_numeric(df[value_col], errors="coerce").fillna(0)
-
-    total_asset_value = float(df[value_col].sum())
-
-    # Category – pick something readable if present
-    category_col = None
-    for candidate in ["asset_type", "network_type", "road_class", "surface_type"]:
-        if candidate in df.columns:
-            category_col = candidate
-            break
-
-    asset_value_by_category: List[AssetValueByCategory] = []
-    if category_col:
-        grouped = (
-            df.groupby(category_col)[value_col]
-            .sum()
-            .reset_index()
-            .sort_values(value_col, ascending=False)
-        )
-        for _, row in grouped.iterrows():
-            label = str(row[category_col])
-            value = float(row[value_col] or 0)
-            asset_value_by_category.append(
-                AssetValueByCategory(label=label, value=value)
-            )
-
-    return total_asset_value, asset_value_by_category
-
-
-def _compute_unit_cost_metrics(
-    workbook_payload: Optional[Dict[str, Any]],
-) -> List[UnitCostByCategory]:
-    """
-    Use 'road_costs' sheet if present.
-
-    We look for a cost-per-km style column and group by surface_type or
-    maintenance_type, depending on what exists.
-    """
-    if not workbook_payload:
-        return []
-
-    df = _get_sheet_df(workbook_payload, "road_costs")
-    if df is None or df.empty:
-        return []
-
-    cost_col = _find_first_numeric_column(
-        df,
-        preferred_names=[
-            "cost_per_km",
-            "unit_cost_per_km",
-            "unit_cost",
-            "cost",
-        ],
-    )
-    if not cost_col:
-        return []
-
-    df[cost_col] = pd.to_numeric(df[cost_col], errors="coerce").fillna(0)
-
-    # Choose a category column
-    category_col = None
-    for candidate in ["surface_type", "treatment_type", "maintenance_type", "road_class"]:
-        if candidate in df.columns:
-            category_col = candidate
-            break
-
-    if not category_col:
-        # No category → summarise a single “all” bucket
-        avg_cost = float(df[cost_col].mean())
-        return [
-            UnitCostByCategory(label="All", cost_per_km=avg_cost),
-        ]
-
-    grouped = (
-        df.groupby(category_col)[cost_col]
-        .mean()
-        .reset_index()
-        .sort_values(cost_col, ascending=False)
-    )
-
-    results: List[UnitCostByCategory] = []
-    for _, row in grouped.iterrows():
-        label = str(row[category_col])
-        cost = float(row[cost_col] or 0)
-        results.append(UnitCostByCategory(label=label, cost_per_km=cost))
-
-    return results
-
-
-# -------------------------------------------------
-# Public service
-# -------------------------------------------------
-
-
-def get_network_snapshot(
-    project_id: UUID,
-    user_id: str,
-) -> NetworkSnapshot:
-    """
-    Compute a lightweight 'network snapshot' for the latest
-    master data upload.
-
-    Sources:
-    - segments sheet      → core totals + breakdowns
-    - network_length      → total_network_length_km, length_by_network_type
-    - asset_value         → total_asset_value, asset_value_by_category
-    - road_costs          → unit_costs_by_surface
-    """
-    # 1) Get latest upload record
-    upload_id, workbook_payload, file_bytes, filename = _fetch_latest_master_data_record(
-        project_id=project_id,
-        user_id=user_id,
-    )
-
-    # 2) Get segments DataFrame
-    df_segments: Optional[pd.DataFrame] = None
-    if workbook_payload:
-        df_segments = _get_segments_df_from_workbook(workbook_payload)
-
-    # Fallback to blob (legacy uploads)
-    if df_segments is None:
-        if not file_bytes or not filename:
-            raise HTTPException(
-                status_code=500,
-                detail="No usable workbook payload or file blob found for snapshot.",
-            )
-        df_segments = parse_master_data_file(file_bytes, filename)
-        df_segments.columns = [str(c).strip().lower() for c in df_segments.columns]
-        if "length_km" in df_segments.columns:
-            df_segments["length_km"] = pd.to_numeric(
-                df_segments["length_km"], errors="coerce"
-            ).fillna(0)
-
-    if "length_km" not in df_segments.columns:
-        raise HTTPException(
-            status_code=400,
-            detail="The master data (segments) does not contain a 'length_km' column.",
-        )
-
-    # 3) Core metrics from segments
-    total_segments = int(len(df_segments.index))
-    total_length_km = float(df_segments["length_km"].sum())
-
-    total_roads: Optional[int] = None
-    if "road_id" in df_segments.columns:
-        total_roads = int(df_segments["road_id"].nunique())
-
-    length_by_road_class = (
-        _compute_length_breakdown(df_segments, "road_class")
-        if "road_class" in df_segments.columns
-        else []
-    )
-    length_by_surface_type = (
-        _compute_length_breakdown(df_segments, "surface_type")
-        if "surface_type" in df_segments.columns
-        else []
-    )
-
-    # 4) Extra metrics from other sheets
-    total_network_length_km, length_by_network_type = _compute_network_length_metrics(
-        workbook_payload
-    )
-    total_asset_value, asset_value_by_category = _compute_asset_value_metrics(
-        workbook_payload
-    )
-    unit_costs_by_surface = _compute_unit_cost_metrics(workbook_payload)
-
-    # 5) Build response
-    return NetworkSnapshot(
-        project_id=project_id,
-        upload_id=upload_id,
-        total_length_km=total_length_km,
-        total_segments=total_segments,
-        total_roads=total_roads,
-        length_by_road_class=length_by_road_class,
-        length_by_surface_type=length_by_surface_type,
-        total_network_length_km=total_network_length_km,
-        length_by_network_type=length_by_network_type,
-        total_asset_value=total_asset_value,
-        asset_value_by_category=asset_value_by_category,
-        unit_costs_by_surface=unit_costs_by_surface,
-    )--- ./network_snapshot/__init__.py ---
+    # 4. Return Flat Structure (matching React state)
+    return {
+        "totalLengthKm": round(total_km, 2),
+        "pavedLengthKm": round(paved_total, 2),
+        "gravelLengthKm": round(gravel_total, 2),
+        "avgVci": _n(data.get("avg_vci_used")),
+        "assetValue": round(asset_value, 2),
+        "totalVehicleKm": _n(data.get("vehicle_km")),
+        "fuelSales": _n(data.get("fuel_sales"))
+    }--- ./network_snapshot/__init__.py ---
 # app/network_snapshot/__init__.py
 from .router import router  # re-export for easy import in main.py
 
 __all__ = ["router"]--- ./network_snapshot/schemas.py ---
-# app/network_snapshot/schemas.py
+from pydantic import BaseModel
+from typing import Optional
 
-from uuid import UUID
-from typing import List, Optional
-
-from pydantic import BaseModel, Field
-
-
-class LengthByCategory(BaseModel):
-    label: str
-    length_km: float
-
-
-class AssetValueByCategory(BaseModel):
-    label: str
-    value: float
-
-
-class UnitCostByCategory(BaseModel):
-    label: str
-    cost_per_km: float
-
-
-class NetworkSnapshot(BaseModel):
-    project_id: UUID
-    upload_id: UUID
-
-    # --- Core from segments sheet ---
-    total_length_km: float
-    total_segments: int
-    total_roads: Optional[int] = None
-
-    length_by_road_class: List[LengthByCategory] = Field(default_factory=list)
-    length_by_surface_type: List[LengthByCategory] = Field(default_factory=list)
-
-    # --- From network_length sheet (optional) ---
-    total_network_length_km: Optional[float] = None
-    length_by_network_type: List[LengthByCategory] = Field(default_factory=list)
-
-    # --- From asset_value sheet (optional) ---
-    total_asset_value: Optional[float] = None
-    asset_value_by_category: List[AssetValueByCategory] = Field(default_factory=list)
-
-    # --- From road_costs sheet (optional) ---
-    unit_costs_by_surface: List[UnitCostByCategory] = Field(default_factory=list)--- ./network_snapshot/router.py ---
-# app/network_snapshot/router.py
-
+class NetworkProfileOut(BaseModel):
+    # The essential stats for the card
+    totalLengthKm: float
+    pavedLengthKm: float
+    gravelLengthKm: float
+    
+    avgVci: float
+    assetValue: float      # The big money number (CRC)
+    
+    totalVehicleKm: float
+    fuelSales: float
+    
+    # Optional metadata if needed later
+    generated_at: Optional[str] = None--- ./network_snapshot/router.py ---
 from uuid import UUID
 from fastapi import APIRouter, Depends
 
 from app.routers.projects import get_current_user_id
-from .schemas import NetworkSnapshot
 from .service import get_network_snapshot
+from .schemas import NetworkProfileOut
 
 router = APIRouter()
 
-
 @router.get(
     "/{project_id}/network/snapshot",
-    response_model=NetworkSnapshot,
-    summary="Get network snapshot for latest master data upload",
+    response_model=NetworkProfileOut,
+    summary="Get calculated asset profile (CRC & VCI)",
 )
 def read_network_snapshot(
     project_id: UUID,
     user_id: str = Depends(get_current_user_id),
 ):
-    """
-    Returns high-level network metrics (total length, segments,
-    breakdown by class and surface) computed from the latest
-    master data upload for this project & user.
-    """
     return get_network_snapshot(project_id=project_id, user_id=user_id)--- ./computation/__init__.py ---
 # app/computation/__init__.py
 from .router import router  # so main.py can `from app.computation import router`
 
 __all__ = ["router"]--- ./computation/engine.py ---
-# app/computation/engine.py
+from __future__ import annotations
 
-import pandas as pd
-import numpy as np
+from datetime import datetime, timezone
 from uuid import UUID
-from app.scenarios.schemas import RonetParameters
-from .schemas import SimulationOutput, YearlyResult
+
+from app.scenarios.schemas import ForecastParametersOut
+from .schemas import SimulationOutput, YearlyResult, SimulationRunOptions
+
 
 def run_ronet_simulation(
     project_id: UUID,
-    scenario_id: UUID,
-    segments_df: pd.DataFrame,
-    costs_df: pd.DataFrame,
-    iri_defaults_df: pd.DataFrame,
-    params: RonetParameters
+    params: ForecastParametersOut,
+    network_profile: dict,
+    options: SimulationRunOptions,
 ) -> SimulationOutput:
-    
-    # --- 1. PREPARE LOOKUPS ---
-    # Convert CSV data into easy-to-use dictionaries
-    
-    # Thresholds: (Road Class, Surface) -> { good_max, poor_min }
-    threshold_map = {} 
-    if not iri_defaults_df.empty:
-        for _, row in iri_defaults_df.iterrows():
-            # Safely handle string conversion and casing
-            r_class = str(row.get('road_class', '')).strip().lower()
-            s_type = str(row.get('surface_type', '')).strip().lower()
-            key = (r_class, s_type)
-            
-            threshold_map[key] = {
-                'good': float(row.get('iri_good_max', 2.5)),
-                'poor': float(row.get('iri_poor_min', 6.0))
-            }
+    """
+    Lightweight RoNET-style simulation.
 
-    # Costs: (Treatment, Surface) -> { cost, reset_iri }
-    cost_map = {}
-    if not costs_df.empty:
-        for _, row in costs_df.iterrows():
-            t_type = str(row.get('treatment', '')).strip().lower()
-            s_type = str(row.get('surface_type', '')).strip().lower()
-            cost_map[(t_type, s_type)] = {
-                'cost': float(row.get('cost_per_km', 0)),
-                'reset_iri': float(row.get('reset_to_iri', 2.0))
-            }
-
-    # --- 2. INITIALIZE NETWORK STATE ---
-    # Work on a copy so we don't mutate original data
-    current_segments = segments_df.copy()
-    
-    # Ensure numeric types and handle missing values
-    current_segments['iri'] = pd.to_numeric(current_segments['iri'], errors='coerce').fillna(4.0)
-    current_segments['length_km'] = pd.to_numeric(current_segments['length_km'], errors='coerce').fillna(1.0)
-    current_segments['aadt'] = pd.to_numeric(current_segments.get('aadt', 0), errors='coerce').fillna(0)
+    NOTE: This is a simplified engine (demo-ready). We can harden the economics
+    (true NPV with discount rate, deferred maintenance penalty, etc.) next.
+    """
 
     yearly_results = []
-    
-    # Deterioration Rates (Simplified for Prototype)
-    DETERIORATION_PAVED = 0.12
-    DETERIORATION_GRAVEL = 0.25
 
-    # --- 3. SIMULATION LOOP (YEAR BY YEAR) ---
-    # Loop exactly the number of years specified by the slider
-    for year in range(1, params.analysis_duration + 1):
-        
-        year_total_cost_needed = 0
-        year_total_cost_spent = 0
-        
-        # Track potential interventions
-        interventions = [] # List of dicts
+    # 1) Determine scope
+    paved_km = network_profile.get("pavedLengthKm", 0) if options.include_paved else 0
+    gravel_km = network_profile.get("gravelLengthKm", 0) if options.include_gravel else 0
 
-        # --- A. DETERMINE NEEDS (Unconstrained) ---
-        for idx, seg in current_segments.iterrows():
-            r_class = str(seg.get('road_class', '')).strip().lower()
-            s_type = str(seg.get('surface_type', '')).strip().lower()
-            iri = seg['iri']
-            length = seg['length_km']
-            
-            # Get Thresholds (Default to 3.0/6.0 if not found)
-            limits = threshold_map.get((r_class, s_type), {'good': 3.0, 'poor': 6.0})
-            
-            # 1. Deteriorate (Roads get older/rougher)
-            det_rate = DETERIORATION_GRAVEL if 'gravel' in s_type else DETERIORATION_PAVED
-            iri += det_rate
-            
-            # 2. Decision Logic (Based on Policy Bias)
-            treatment_needed = None
-            
-            if params.policy_bias == "preventive":
-                # Fix as soon as it leaves "Good" condition
-                if iri > limits['good']: 
-                    treatment_needed = "periodic reseal" if 'paved' in s_type else "regravelling"
-            
-            elif params.policy_bias == "reactive":
-                # Fix only when it reaches "Poor" condition
-                if iri > limits['poor']: 
-                    treatment_needed = "rehabilitation" if 'paved' in s_type else "regravelling"
-            
-            else: # "balanced"
-                if iri > limits['poor']:
-                    treatment_needed = "rehabilitation" if 'paved' in s_type else "regravelling"
-                elif iri > limits['good']:
-                    # Only do lighter fix if we are strictly in Fair (and not Poor)
-                    treatment_needed = "periodic reseal" if 'paved' in s_type else "blading"
+    # 2) Time setup
+    duration = int(getattr(params, "analysis_duration", 5) or 5)
+    start_year = options.start_year_override or (datetime.now(timezone.utc).year + 1)
 
-            # 3. Calculate Cost if treatment is needed
-            if treatment_needed:
-                cost_info = cost_map.get((treatment_needed, s_type))
-                
-                # Fallback costs if CSV lookup fails
-                if not cost_info:
-                    if "reseal" in treatment_needed: cost_info = {'cost': 900000, 'reset_iri': 2.2}
-                    elif "rehab" in treatment_needed: cost_info = {'cost': 3500000, 'reset_iri': 1.5}
-                    elif "regravel" in treatment_needed: cost_info = {'cost': 600000, 'reset_iri': 4.0}
-                    else: cost_info = {'cost': 50000, 'reset_iri': iri - 0.5}
+    # 3) Financials
+    inflation = float(getattr(params, "cpi_percentage", 6.0) or 0) / 100.0
 
-                cost = cost_info['cost'] * length
-                reset_iri = cost_info['reset_iri']
-                
-                year_total_cost_needed += cost
-                interventions.append({
-                    'idx': idx,
-                    'cost': cost,
-                    'reset_iri': reset_iri,
-                    'current_iri': iri
-                })
-            
-            # Temporarily save deteriorated state (will be overwritten if fixed)
-            current_segments.at[idx, 'iri'] = iri
+    # --- engineering logic (placeholders but stable) ---
+    base_need_paved = float(paved_km) * 160_000
+    base_need_gravel = float(gravel_km) * 45_000
+    total_annual_need_today = base_need_paved + base_need_gravel
 
-        # --- B. APPLY BUDGET CONSTRAINT ---
-        # 100% means we spend exactly what is needed. <100% means we cut projects.
-        budget_factor = params.budget_percent_baseline / 100.0
-        available_budget = year_total_cost_needed * budget_factor
-        
-        # Sort interventions by AADT (High traffic gets priority funding)
-        interventions.sort(key=lambda x: current_segments.at[x['idx'], 'aadt'], reverse=True)
-        
-        for action in interventions:
-            if available_budget >= action['cost']:
-                # Fund the project
-                available_budget -= action['cost']
-                year_total_cost_spent += action['cost']
-                # Apply improvement (reset IRI)
-                current_segments.at[action['idx'], 'iri'] = action['reset_iri']
-            else:
-                # No budget -> Road stays deteriorated
-                pass
+    current_vci = float(network_profile.get("avgVci", 50) or 0)
+    current_asset_value = float(network_profile.get("assetValue", 0) or 0)
 
-        # --- C. CALCULATE YEARLY STATS ---
-        total_len = current_segments['length_km'].sum()
-        if total_len == 0: total_len = 1 # Avoid division by zero
-        
-        # Weighted Average IRI
-        avg_iri = (current_segments['iri'] * current_segments['length_km']).sum() / total_len
-        
-        # Calculate Condition Buckets
-        good_km, fair_km, poor_km = 0, 0, 0
-        
-        for _, seg in current_segments.iterrows():
-            r_class = str(seg.get('road_class', '')).strip().lower()
-            s_type = str(seg.get('surface_type', '')).strip().lower()
-            limits = threshold_map.get((r_class, s_type), {'good': 3.0, 'poor': 6.0})
-            
-            if seg['iri'] <= limits['good']: good_km += seg['length_km']
-            elif seg['iri'] <= limits['poor']: fair_km += seg['length_km']
-            else: poor_km += seg['length_km']
+    for i in range(duration):
+        year = start_year + i
 
-        yearly_results.append(YearlyResult(
-            year=year,
-            avg_condition_index=round(avg_iri, 2),
-            pct_good=round((good_km / total_len) * 100, 1),
-            pct_fair=round((fair_km / total_len) * 100, 1),
-            pct_poor=round((poor_km / total_len) * 100, 1),
-            total_maintenance_cost=round(year_total_cost_spent, 2),
-            asset_value=0 # Placeholder for advanced asset value logic
-        ))
+        # A) Apply inflation to annual need
+        year_inflation_factor = (1 + inflation) ** i
+        nominal_cost_needed = total_annual_need_today * year_inflation_factor
+
+        # B) Simulate condition change (simple: small improvement when included)
+        if (paved_km + gravel_km) > 0:
+            improvement = 0.8
+            current_vci = min(100.0, current_vci + improvement)
+            current_asset_value *= (1 + (inflation * 0.5))
+        else:
+            current_vci = max(0.0, current_vci - 2.5)
+
+        yearly_results.append(
+            YearlyResult(
+                year=year,
+                avg_condition_index=round(current_vci, 2),
+                pct_good=round(current_vci * 0.45, 1),
+                pct_fair=round(current_vci * 0.35, 1),
+                pct_poor=round(current_vci * 0.20, 1),
+                total_maintenance_cost=round(nominal_cost_needed, 2),
+                asset_value=round(current_asset_value, 2),
+            )
+        )
+
+    total_cost = sum(y.total_maintenance_cost for y in yearly_results) if yearly_results else 0.0
+    final_vci = yearly_results[-1].avg_condition_index if yearly_results else 0.0
 
     return SimulationOutput(
         project_id=str(project_id),
-        scenario_id=str(scenario_id),
-        year_count=params.analysis_duration,
+        year_count=duration,
         yearly_data=yearly_results,
-        total_cost_npv=sum(y.total_maintenance_cost for y in yearly_results),
-        final_network_condition=yearly_results[-1].avg_condition_index
+        total_cost_npv=float(total_cost),
+        final_network_condition=float(final_vci),
+        generated_at=datetime.now(timezone.utc),
     )--- ./computation/schemas.py ---
-# app/computation/schemas.py
+from __future__ import annotations
 
-from typing import List, Dict, Optional
-from pydantic import BaseModel
+from datetime import datetime, timezone
+from typing import List, Optional
+from uuid import UUID
+
+from pydantic import BaseModel, Field
+
+
+# ============================================================
+# INPUT: Simulation run options (from frontend)
+# ============================================================
+
+class SimulationRunOptions(BaseModel):
+    """
+    Frontend sends camelCase, backend stores/uses snake_case.
+
+    We keep aliases so BOTH of these work:
+      - {"startYearOverride": 2027}
+      - {"start_year_override": 2027}
+    """
+    start_year_override: Optional[int] = Field(None, alias="startYearOverride")
+    include_paved: bool = Field(True, alias="includePaved")
+    include_gravel: bool = Field(True, alias="includeGravel")
+
+    class Config:
+        populate_by_name = True
+
+
+# ============================================================
+# OUTPUT: Core simulation payload (stored in simulation_results.results_payload)
+# ============================================================
 
 class YearlyResult(BaseModel):
     year: int
@@ -1238,149 +796,168 @@ class YearlyResult(BaseModel):
     total_maintenance_cost: float
     asset_value: float
 
+
 class SimulationOutput(BaseModel):
     project_id: str
-    scenario_id: str
     year_count: int
-    
-    # Time Series Data (for charts)
     yearly_data: List[YearlyResult]
-    
-    # Aggregates (for summary cards)
     total_cost_npv: float
-    final_network_condition: float--- ./computation/router.py ---
-from fastapi import APIRouter, Depends, HTTPException
+    final_network_condition: float
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ============================================================
+# OUTPUT: DB row wrapper (for history / audit / "who ran it")
+# ============================================================
+
+class SimulationRunOut(BaseModel):
+    id: UUID
+    project_id: UUID
+    scenario_id: Optional[UUID] = None
+    run_at: datetime
+    triggered_by: Optional[UUID] = None
+    status: str = "completed"
+    results_payload: SimulationOutput
+
+    class Config:
+        from_attributes = True--- ./computation/router.py ---
+from __future__ import annotations
+
 from uuid import UUID
-import pandas as pd
+from typing import List
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from psycopg2.extras import Json
+
 from app.routers.projects import get_current_user_id, get_db_connection
 from app.scenarios import service as scenario_service
 from . import engine, schemas
 
 router = APIRouter()
 
-# --- 👇 THIS WAS MISSING: The Endpoint to fetch results ---
-@router.get(
-    "/{project_id}/simulation/latest",
-    response_model=schemas.SimulationOutput,
-    summary="Get results from the most recent simulation run"
-)
-def get_latest_simulation_result(
-    project_id: UUID,
-    user_id: str = Depends(get_current_user_id)
-):
-    # Fetch the Baseline Scenario ID first
-    scenario = scenario_service.get_or_create_baseline(project_id, user_id)
-    
-    # Get the result specifically for this scenario
-    sql = """
-        SELECT results_payload
-        FROM public.simulation_results
-        WHERE project_id = %s AND scenario_id = %s
-        LIMIT 1;
-    """
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (str(project_id), str(scenario.id)))
-            row = cur.fetchone()
-            
-    if not row:
-        raise HTTPException(404, "No simulation results found for this project.")
-        
-    return row[0]
 
-
-# --- Existing Run Logic (Unchanged) ---
 @router.post(
     "/{project_id}/simulation/run",
-    response_model=schemas.SimulationOutput,
-    summary="Trigger a RONET simulation run"
+    response_model=schemas.SimulationRunOut,
+    summary="Trigger a Simulation and SAVE results (history kept)"
 )
 def run_simulation(
     project_id: UUID,
-    user_id: str = Depends(get_current_user_id)
+    options: schemas.SimulationRunOptions,
+    user_id: str = Depends(get_current_user_id),
 ):
-    # 1. Fetch Workbook Data (Segments + Lookups)
+    # 1) Load prerequisites
     try:
-        sql = """
-            SELECT workbook_payload 
-            FROM public.master_data_uploads
-            WHERE project_id = %s AND user_id = %s
-            ORDER BY created_at DESC LIMIT 1;
-        """
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (str(project_id), user_id))
-                row = cur.fetchone()
-                
-        if not row or not row[0]:
-            raise HTTPException(404, "No master data found. Please upload a workbook first.")
-            
-        payload = row[0]
-        
-        if "segments" not in payload:
-             raise HTTPException(400, "Workbook missing 'segments' sheet.")
-        df_segments = pd.DataFrame(payload["segments"])
-        
-        # Extract Lookups
-        df_costs = pd.DataFrame(payload.get("road_costs", []))
-        df_iri = pd.DataFrame(payload.get("iri_defaults", []))
-        
-    except HTTPException:
-        raise
+        scenario_params = scenario_service.get_forecast(project_id, user_id)
+        from app.network_snapshot.service import get_network_snapshot  # local import avoids circulars
+        network_profile = get_network_snapshot(project_id, user_id)
     except Exception as e:
-        raise HTTPException(500, f"Error loading master data: {e}")
+        raise HTTPException(status_code=500, detail=f"Error loading prerequisites: {e}")
 
-    # 2. Fetch Scenario Parameters (The Sliders)
-    # This fetches the 'analysis_duration' you saved in Step 2
-    try:
-        scenario = scenario_service.get_or_create_baseline(project_id, user_id)
-    except Exception as e:
-        raise HTTPException(500, f"Error loading scenario: {e}")
-
-    # 3. Run Engine
-    # The 'params' object contains the exact years set in your UI slider
+    # 2) Run engine
     try:
         result = engine.run_ronet_simulation(
             project_id=project_id,
-            scenario_id=scenario.id,
-            segments_df=df_segments,
-            costs_df=df_costs,
-            iri_defaults_df=df_iri,
-            params=scenario.parameters 
+            params=scenario_params,
+            network_profile=network_profile,
+            options=options,
         )
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(500, f"Simulation engine failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Simulation engine failed: {e}")
 
-    # 4. Save Results to DB (OVERWRITE MODE)
-    # We delete any existing result for this specific scenario first
-    sql_delete = """
-        DELETE FROM public.simulation_results
-        WHERE project_id = %s AND scenario_id = %s;
-    """
-    
+    # 3) Save run to DB (DO NOT delete previous runs — we want history/audit)
     sql_insert = """
-        INSERT INTO public.simulation_results 
-        (project_id, scenario_id, results_payload, triggered_by)
-        VALUES (%s, %s, %s, %s);
+        INSERT INTO public.simulation_results
+            (project_id, scenario_id, results_payload, triggered_by, status)
+        VALUES
+            (%s, %s, %s, %s, 'completed')
+        RETURNING
+            id, project_id, scenario_id, results_payload, run_at, triggered_by, status;
     """
-    
+
+    scenario_id = str(scenario_params.id) if getattr(scenario_params, "id", None) else None
+
+    with get_db_connection() as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql_insert,
+                    (
+                        str(project_id),
+                        scenario_id,
+                        Json(result.model_dump()),  # jsonb expects dict, not string
+                        user_id,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+
+                cols = [d[0] for d in cur.description]
+                record = dict(zip(cols, row))
+                return record
+
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to save simulation result: {e}")
+
+
+@router.get(
+    "/{project_id}/simulation/latest",
+    response_model=schemas.SimulationRunOut,
+    summary="Get the most recent simulation result (with audit fields)"
+)
+def get_latest_simulation(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+):
+    sql = """
+        SELECT id, project_id, scenario_id, results_payload, run_at, triggered_by, status
+        FROM public.simulation_results
+        WHERE project_id = %s
+        ORDER BY run_at DESC
+        LIMIT 1;
+    """
+
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Step A: Clear old run
-            cur.execute(sql_delete, (str(project_id), str(scenario.id)))
-            
-            # Step B: Insert new run
-            cur.execute(sql_insert, (
-                str(project_id), 
-                str(scenario.id), 
-                result.model_dump_json(), 
-                user_id
-            ))
-            conn.commit()
+            cur.execute(sql, (str(project_id),))
+            row = cur.fetchone()
 
-    return result--- ./dashboards/service.py ---
+            if not row:
+                raise HTTPException(status_code=404, detail="No simulation results found.")
+
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))
+
+
+@router.get(
+    "/{project_id}/simulation/history",
+    response_model=List[schemas.SimulationRunOut],
+    summary="List simulation runs for a project (history)"
+)
+def list_simulation_history(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+    limit: int = Query(20, ge=1, le=200),
+):
+    sql = """
+        SELECT id, project_id, scenario_id, results_payload, run_at, triggered_by, status
+        FROM public.simulation_results
+        WHERE project_id = %s
+        ORDER BY run_at DESC
+        LIMIT %s;
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), limit))
+            rows = cur.fetchall()
+
+            if not rows:
+                return []
+
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in rows]--- ./dashboards/service.py ---
 # app/dashboards/service.py
 from typing import List
 from uuid import UUID
@@ -1670,281 +1247,130 @@ def update_dashboard(
         cols = [d[0] for d in cur.description]
         conn.commit()
         return dict(zip(cols, row))--- ./scenarios/service.py ---
-# app/scenarios/service.py
-
 from uuid import UUID
-from typing import List
 from fastapi import HTTPException
-
-from .schemas import (
-    ScenarioCreate,
-    ScenarioUpdate,
-    ScenarioRead,
-    ScenarioSummary,
-    RonetParameters
-)
 from . import repository as repo
+from .schemas import ForecastParametersOut, ForecastParametersPatch
 
-def get_or_create_baseline(project_id: UUID, user_id: str) -> ScenarioRead:
-    """
-    Fetch the baseline scenario. If none exists, create a default one.
-    This ensures the 'Config' page always has something to load.
-    """
-    row = repo.get_baseline_scenario(project_id, user_id)
+def get_forecast(project_id: UUID, user_id: str) -> ForecastParametersOut:
+    # 1. Ensure DB row exists (Lazy Creation)
+    repo.ensure_assumptions_row(project_id, user_id)
     
-    if row:
-        return ScenarioRead(**row)
-    
-    # Create default baseline if missing
-    # We explicitly initialize default parameters here
-    default_payload = ScenarioCreate(
-        name="Baseline Scenario",
-        description="Default configuration generated by system.",
-        is_baseline=True,
-        parameters=RonetParameters() 
-    )
-    
-    # Create it
-    new_row = repo.create_scenario(
-        project_id, 
-        user_id, 
-        default_payload.model_dump()
-    )
-    return ScenarioRead(**new_row)
+    # 2. Fetch
+    data = repo.get_forecast_params(project_id, user_id)
+    if not data:
+        raise HTTPException(404, "Forecast parameters not found")
+        
+    return ForecastParametersOut(**data)
 
-def update_scenario(
-    project_id: UUID,
-    scenario_id: UUID,
-    user_id: str,
-    payload: ScenarioUpdate,
-) -> ScenarioRead:
-    # Exclude unset to allow partial updates (PATCH behavior)
+def update_forecast(project_id: UUID, user_id: str, payload: ForecastParametersPatch) -> ForecastParametersOut:
+    # 1. Ensure DB row exists
+    repo.ensure_assumptions_row(project_id, user_id)
+    
+    # 2. Update
     data = payload.model_dump(exclude_unset=True)
+    updated = repo.update_forecast_params(project_id, user_id, data)
     
-    row = repo.update_scenario(project_id, scenario_id, user_id, data)
-    if not row:
-        raise HTTPException(status_code=404, detail="Scenario not found.")
-    return ScenarioRead(**row)
-
-def list_scenarios(project_id: UUID, user_id: str) -> List[ScenarioSummary]:
-    rows = repo.list_scenarios(project_id, user_id)
-    return [ScenarioSummary(**row) for row in rows]
-
-def get_scenario(project_id: UUID, scenario_id: UUID, user_id: str) -> ScenarioRead:
-    row = repo.get_scenario(project_id, scenario_id, user_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Scenario not found.")
-    return ScenarioRead(**row)--- ./scenarios/__init__.py ---
+    if not updated:
+        raise HTTPException(500, "Failed to update parameters")
+        
+    return ForecastParametersOut(**updated)--- ./scenarios/__init__.py ---
 # app/scenarios/__init__.py
 from .router import router
 
 __all__ = ["router"]--- ./scenarios/schemas.py ---
-# app/scenarios/schemas.py
-
+from pydantic import BaseModel
+from typing import Optional
 from uuid import UUID
-from typing import Optional, Literal
 from datetime import datetime
-from pydantic import BaseModel, Field
 
-# --- The shape of the JSON stored in 'parameters' column ---
-# This matches the sliders on your frontend
-class RonetParameters(BaseModel):
-    analysis_duration: int = Field(20, ge=5, le=30, description="Analysis period in years")
-    budget_strategy: Literal["unconstrained", "fixed_limit", "percent_baseline"] = "percent_baseline"
-    annual_budget_cap: Optional[float] = None
-    budget_percent_baseline: int = Field(100, ge=50, le=150, description="% of required budget")
-    policy_bias: Literal["preventive", "balanced", "reactive"] = "balanced"
-    discount_rate: float = 8.0
-
-# --- CRUD Schemas ---
-
-class ScenarioCreate(BaseModel):
-    name: str
-    description: Optional[str] = None
-    is_baseline: bool = False
-    # Default to standard parameters if none provided
-    parameters: RonetParameters = Field(default_factory=RonetParameters)
-
-class ScenarioUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    # Allow partial updates to parameters
-    parameters: Optional[RonetParameters] = None
-
-class ScenarioRead(BaseModel):
+class ForecastParametersOut(BaseModel):
     id: UUID
     project_id: UUID
-    user_id: UUID
-    name: str
-    description: Optional[str]
-    is_baseline: bool
-    parameters: RonetParameters  # API always returns parsed structure
-    created_at: datetime
+    
+    # Section A: Economic Reality
+    cpi_percentage: float = 6.0
+    discount_rate: float = 8.0
+    previous_allocation: float = 0
+    
+    # Section B: Engineering Reality
+    paved_deterioration_rate: str = "Medium" # Slow, Medium, Fast
+    gravel_loss_rate: float = 20.0          # mm/year
+    climate_stress_factor: str = "Medium"   # Low, Medium, High
+    
+    # Section C: Time Machine
+    analysis_duration: int = 5
+    
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
-
-class ScenarioSummary(BaseModel):
-    id: UUID
-    name: str
-    is_baseline: bool
-    created_at: datetime--- ./scenarios/router.py ---
-# app/scenarios/router.py
-
+class ForecastParametersPatch(BaseModel):
+    cpi_percentage: Optional[float] = None
+    discount_rate: Optional[float] = None
+    previous_allocation: Optional[float] = None
+    
+    paved_deterioration_rate: Optional[str] = None
+    gravel_loss_rate: Optional[float] = None
+    climate_stress_factor: Optional[str] = None
+    
+    analysis_duration: Optional[int] = None--- ./scenarios/router.py ---
+from fastapi import APIRouter, Depends
 from uuid import UUID
-from typing import List
-from fastapi import APIRouter, Depends, status
 
 from app.routers.projects import get_current_user_id
-from .schemas import (
-    ScenarioCreate,
-    ScenarioUpdate,
-    ScenarioRead,
-    ScenarioSummary,
-)
+from .schemas import ForecastParametersOut, ForecastParametersPatch
 from . import service
 
 router = APIRouter()
 
-# --- Config Page Endpoint ---
 @router.get(
-    "/{project_id}/scenarios/baseline",
-    response_model=ScenarioRead,
-    summary="Get (or create) the baseline scenario for config page"
+    "/{project_id}/forecast",
+    response_model=ForecastParametersOut,
+    summary="Get forecast & strategy assumptions"
 )
-def get_project_baseline(
+def get_forecast_parameters(
     project_id: UUID,
     user_id: str = Depends(get_current_user_id),
 ):
-    return service.get_or_create_baseline(project_id, user_id)
+    return service.get_forecast(project_id, user_id)
 
-# --- Standard CRUD ---
-
-@router.post(
-    "/{project_id}/scenarios",
-    response_model=ScenarioRead,
-    status_code=status.HTTP_201_CREATED,
+@router.patch(
+    "/{project_id}/forecast",
+    response_model=ForecastParametersOut,
+    summary="Update forecast & strategy assumptions"
 )
-def create_project_scenario(
+def update_forecast_parameters(
     project_id: UUID,
-    payload: ScenarioCreate,
+    payload: ForecastParametersPatch,
     user_id: str = Depends(get_current_user_id),
 ):
-    return service.create_scenario(project_id, user_id, payload)
-
-@router.get(
-    "/{project_id}/scenarios",
-    response_model=List[ScenarioSummary],
-)
-def list_project_scenarios(
-    project_id: UUID,
-    user_id: str = Depends(get_current_user_id),
-):
-    return service.list_scenarios(project_id, user_id)
-
-@router.get(
-    "/{project_id}/scenarios/{scenario_id}",
-    response_model=ScenarioRead,
-)
-def get_project_scenario(
-    project_id: UUID,
-    scenario_id: UUID,
-    user_id: str = Depends(get_current_user_id),
-):
-    return service.get_scenario(project_id, scenario_id, user_id)
-
-@router.put(
-    "/{project_id}/scenarios/{scenario_id}",
-    response_model=ScenarioRead,
-)
-def update_project_scenario(
-    project_id: UUID,
-    scenario_id: UUID,
-    payload: ScenarioUpdate,
-    user_id: str = Depends(get_current_user_id),
-):
-    return service.update_scenario(project_id, scenario_id, user_id, payload)--- ./scenarios/repository.py ---
-# app/scenarios/repository.py
-
+    return service.update_forecast(project_id, user_id, payload)--- ./scenarios/repository.py ---
 from uuid import UUID
-from typing import List, Dict, Any, Optional
-from psycopg2.extras import Json
+from typing import Dict, Any, Optional
 from app.routers.projects import get_db_connection
 
-def create_scenario(
-    project_id: UUID,
-    user_id: str,
-    payload: Dict[str, Any],
-) -> Dict[str, Any]:
-    sql = """
-        INSERT INTO public.project_scenarios (
-            project_id, user_id,
-            name, description, is_baseline, parameters
-        )
-        VALUES (%s, %s, %s, %s, %s, %s)
-        RETURNING
-            id, project_id, user_id,
-            name, description, is_baseline,
-            parameters, created_at, updated_at;
+def ensure_assumptions_row(project_id: UUID, user_id: str) -> None:
     """
-    
-    # Ensure parameters are serialized to JSON
-    # payload["parameters"] comes in as a dict from the Pydantic model
-    params_json = Json(payload.get("parameters", {}))
-
+    Ensures a row exists for this project in the assumptions table.
+    """
+    sql = """
+        INSERT INTO public.scenario_assumptions (project_id, user_id)
+        VALUES (%s, %s)
+        ON CONFLICT (project_id) DO NOTHING;
+    """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                sql,
-                (
-                    str(project_id),
-                    user_id,
-                    payload["name"],
-                    payload.get("description"),
-                    payload.get("is_baseline", False),
-                    params_json,
-                ),
-            )
-            row = cur.fetchone()
-            conn.commit()
-            cols = [d[0] for d in cur.description]
-            return dict(zip(cols, row))
+            cur.execute(sql, (str(project_id), user_id))
+        conn.commit()
 
-def list_scenarios(project_id: UUID, user_id: str) -> List[Dict[str, Any]]:
+def get_forecast_params(project_id: UUID, user_id: str) -> Optional[Dict[str, Any]]:
     sql = """
-        SELECT id, name, is_baseline, created_at
-        FROM public.project_scenarios
+        SELECT 
+            id, project_id, updated_at,
+            analysis_duration, discount_rate,
+            cpi_percentage, previous_allocation,
+            paved_deterioration_rate, gravel_loss_rate, climate_stress_factor
+        FROM public.scenario_assumptions
         WHERE project_id = %s AND user_id = %s
-        ORDER BY is_baseline DESC, created_at DESC;
-    """
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (str(project_id), user_id))
-            rows = cur.fetchall()
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, r)) for r in rows]
-
-def get_scenario(project_id: UUID, scenario_id: UUID, user_id: str) -> Optional[Dict[str, Any]]:
-    sql = """
-        SELECT * FROM public.project_scenarios
-        WHERE project_id = %s AND id = %s AND user_id = %s;
-    """
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (str(project_id), str(scenario_id), user_id))
-            row = cur.fetchone()
-            if not row:
-                return None
-            cols = [d[0] for d in cur.description]
-            return dict(zip(cols, row))
-
-def get_baseline_scenario(project_id: UUID, user_id: str) -> Optional[Dict[str, Any]]:
-    """Helper to find the designated baseline scenario."""
-    sql = """
-        SELECT * FROM public.project_scenarios
-        WHERE project_id = %s AND user_id = %s AND is_baseline = true
-        LIMIT 1;
     """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -1955,44 +1381,30 @@ def get_baseline_scenario(project_id: UUID, user_id: str) -> Optional[Dict[str, 
             cols = [d[0] for d in cur.description]
             return dict(zip(cols, row))
 
-def update_scenario(
-    project_id: UUID,
-    scenario_id: UUID,
-    user_id: str,
-    payload: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
-    
-    fields = []
+def update_forecast_params(project_id: UUID, user_id: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    # Dynamic SQL construction
+    set_clauses = []
     values = []
-
-    if "name" in payload:
-        fields.append("name = %s")
-        values.append(payload["name"])
-    if "description" in payload:
-        fields.append("description = %s")
-        values.append(payload["description"])
-    if "is_baseline" in payload:
-        fields.append("is_baseline = %s")
-        values.append(payload["is_baseline"])
-    if "parameters" in payload:
-        fields.append("parameters = %s")
-        # Ensure we wrap the dict in Json() adapter
-        values.append(Json(payload["parameters"]))
-
-    if not fields:
-        return get_scenario(project_id, scenario_id, user_id)
-
-    fields.append("updated_at = now()")
+    for k, v in data.items():
+        set_clauses.append(f"{k} = %s")
+        values.append(v)
     
+    if not set_clauses:
+        return get_forecast_params(project_id, user_id)
+
     sql = f"""
-        UPDATE public.project_scenarios
-        SET {", ".join(fields)}
-        WHERE project_id = %s AND id = %s AND user_id = %s
-        RETURNING *;
+        UPDATE public.scenario_assumptions
+        SET {", ".join(set_clauses)}, updated_at = NOW()
+        WHERE project_id = %s AND user_id = %s
+        RETURNING 
+            id, project_id, updated_at,
+            analysis_duration, discount_rate,
+            cpi_percentage, previous_allocation,
+            paved_deterioration_rate, gravel_loss_rate, climate_stress_factor
     """
     
-    values.extend([str(project_id), str(scenario_id), user_id])
-
+    values.extend([str(project_id), user_id])
+    
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, tuple(values))
@@ -2033,403 +1445,578 @@ class ProjectDB(BaseModel):
     class Config:
         orm_mode = True # Allows Pydantic to read ORM objects--- ./db/__init__.py ---
 --- ./db/schemas.py ---
-# app/db/schemas.py
-
 from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
+from typing import Optional
 from datetime import datetime
 from uuid import UUID
 
+
 # ============================================================
-# PROJECT Schemas
+# PROJECT Schemas (proposal-first flow)
 # ============================================================
 
 class ProjectMetadata(BaseModel):
     project_name: str
-    description: Optional[str] = None
+    province: str
     start_year: int
-    forecast_duration: int
-    discount_rate: float
 
 
 class ProjectDB(BaseModel):
     id: UUID
     user_id: UUID
     project_name: str
-    description: Optional[str] = None
+    province: str
     start_year: int
-    forecast_duration: int
-    discount_rate: float
+
+    proposal_title: Optional[str] = None
+    proposal_status: Optional[str] = None
+
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
-        from_attributes = True
+        from_attributes = True--- ./ai_advisor/service.py ---
+import os
+import json
+from openai import OpenAI
+from dotenv import load_dotenv
 
-# ============================================================
-# MASTER DATA Schemas
-# ============================================================
+load_dotenv()
 
-class MasterDataUploadStatus(BaseModel):
-    id: UUID
-    project_id: UUID
-    user_id: UUID
-    original_filename: str
-    mime_type: str
-    file_size: int
-    status: str
-    row_count: Optional[int] = None
-    validation_errors: Optional[Dict[str, Any]] = None
-    created_at: datetime--- ./main.py ---
-# app/main.py (FINAL UPDATED VERSION)
+# Initialize OpenAI Client
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def generate_strategic_narrative(context_data: dict) -> dict:
+    """
+    Sends simulation data to OpenAI and returns a structured strategic review.
+    """
+    
+    # 1. The Persona (Who the AI is)
+    system_prompt = """
+        You are a Senior Infrastructure Economist advising the Provincial Treasury.
+            
+            Your task is two-fold:
+            1. Analyze specific graph data points (Condition Forecast, Financials).
+            2. Write a formal strategic conclusion.
+
+            Output Format: return ONLY a JSON object with this exact structure:
+            {
+                "chart_insights": {
+                    "condition_forecast": "One short, sharp sentence analyzing the VCI trend (e.g. 'The rapid decline in 2028 indicates a structural failure point.').",
+                    "budget_impact": "One short, sharp sentence on the financial reality (e.g. 'Current funding covers only 60% of depreciation.')."
+                },
+                "executive_summary": "A 2-sentence high-level summary of the crisis.",
+                "risk_analysis": "A paragraph explaining the financial and engineering risks.",
+                "economic_impact": "A short statement on broader economic effects.",
+                "recommended_action": ["Action 1", "Action 2", "Action 3"]
+            }
+    """
+
+    # 2. The Data (What the AI analyzes)
+    user_prompt = f"""
+    Analyze the following network simulation results for a funding proposal:
+    
+    - Project Name: {context_data.get('project_name', 'Provincial Road Network')}
+    - Forecast Duration: {context_data.get('duration')} Years
+    - Current Asset Value (CRC): {context_data.get('current_asset_value')}
+    - Current Network Health (VCI): {context_data.get('start_vci')}
+    
+    SCENARIO OUTCOME (If this budget is approved):
+    - Total Budget Required (NPV): {context_data.get('total_cost')}
+    - Future Network Health (VCI): {context_data.get('end_vci')}
+    - Health Change: {context_data.get('vci_change')} points
+    - Inflation Rate Used: {context_data.get('inflation')}%
+    
+    If the VCI drops, emphasize the destruction of asset value. 
+    If the VCI improves, emphasize the return on investment.
+    """
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o", # Or "gpt-3.5-turbo" if you want to save credits
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format={"type": "json_object"}, # Forces clean JSON
+            temperature=0.7
+        )
+        
+        # Parse the JSON string back into a Python dictionary
+        content = response.choices[0].message.content
+        return json.loads(content)
+        
+    except Exception as e:
+        print(f"OpenAI Error: {e}")
+        # Fallback if API fails or runs out of credits
+        return {
+            "executive_summary": "Unable to generate AI analysis at this time.",
+            "risk_analysis": "Please review the data manually.",
+            "economic_impact": "N/A",
+            "recommended_action": ["Review inputs", "Check API connection"]
+        }--- ./ai_advisor/router.py ---
+from fastapi import APIRouter, Depends, HTTPException
+from uuid import UUID
+import json
+from app.routers.projects import get_current_user_id, get_db_connection
+from .service import generate_strategic_narrative
+
+router = APIRouter()
+
+@router.get(
+    "/{project_id}/advisor/generate",
+    summary="Generate AI Strategic Feedback based on latest simulation"
+)
+def get_ai_feedback(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id)
+):
+    # 1. Fetch Project Meta (Name)
+    project_name = "Unknown Project"
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT project_name FROM projects WHERE id = %s", (str(project_id),))
+            row = cur.fetchone()
+            if row:
+                project_name = row[0]
+
+            # 2. Fetch Latest Simulation Result
+            cur.execute("""
+                SELECT results_payload 
+                FROM simulation_results 
+                WHERE project_id = %s 
+                ORDER BY run_at DESC LIMIT 1
+            """, (str(project_id),))
+            row = cur.fetchone()
+            
+            if not row:
+                raise HTTPException(404, "No simulation data found. Run a simulation first.")
+                
+            sim_data = row[0] # This is the JSON dict from the DB
+
+    # 3. Simplify Data for the AI (Don't send huge arrays)
+    # We extract only what matters for the story
+    yearly = sim_data.get("yearly_data", [])
+    if not yearly:
+        raise HTTPException(400, "Corrupt simulation data.")
+
+    start_vci = yearly[0].get("avg_condition_index")
+    end_vci = yearly[-1].get("avg_condition_index")
+    
+    # Format huge numbers to readable strings (e.g., "R 40.5 Billion")
+    def fmt_money(x):
+        return f"R {x/1_000_000_000:.2f} Billion" if x > 1_000_000_000 else f"R {x/1_000_000:.1f} Million"
+
+    context_payload = {
+        "project_name": project_name,
+        "duration": sim_data.get("year_count"),
+        "current_asset_value": fmt_money(yearly[0].get("asset_value", 0)),
+        "start_vci": start_vci,
+        "end_vci": end_vci,
+        "vci_change": round(end_vci - start_vci, 2),
+        "total_cost": fmt_money(sim_data.get("total_cost_npv", 0)),
+        "inflation": 6.0 # Hardcoded or fetch from forecast params if you prefer
+    }
+
+    # 4. Call the AI Brain
+    ai_response = generate_strategic_narrative(context_payload)
+    
+    return ai_response--- ./main.py ---
+# app/main.py
 
 from pathlib import Path
 from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 # -------------------------------------------------------------------
-# Load .env BEFORE importing anything that relies on environment vars
+# 1. Load .env
 # -------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 # -------------------------------------------------------------------
-# FastAPI + CORS
+# 2. Router Imports
 # -------------------------------------------------------------------
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
-# Routers
-# NOTE: Ensure each module's __init__.py exposes 'router' 
-# or change imports to: from app.master_data.router import router as ...
-from app.routers import projects
-from app.master_data import router as master_data_router
-from app.network_snapshot import router as network_snapshot_router
-from app.scenarios import router as scenarios_router
-from app.computation import router as computation_router
-# Only include this if the dashboards module exists to avoid startup errors
-from app.dashboards import router as dashboards_router 
-from app.routers import provincial_stats
+from app.routers.projects import router as projects_router
+from app.proposal_data.router import router as proposal_data_router
+from app.network_snapshot.router import router as network_snapshot_router
+from app.scenarios.router import router as scenarios_router
+from app.computation.router import router as computation_router
+from app.ai_advisor import router as ai_router
 
 # -------------------------------------------------------------------
-# FastAPI APP CONFIG
+# 3. App Config
 # -------------------------------------------------------------------
 app = FastAPI(
     title="Mosianedi Investment API",
-    description="API Gateway for RONET computation and scenario management.",
+    description="API Gateway for Provincial Road Budget Proposals & Forecasting.",
+    version="1.0.0",
 )
 
+# -------------------------------------------------------------------
+# 4. CORS Middleware (The Fix)
+# -------------------------------------------------------------------
+# You MUST list the specific domains. Wildcard "*" fails with credentials.
+origins = [
+    "http://localhost:3000",                      # Local Development
+    "https://mosianedi-frontend.vercel.app",      # Production Frontend
+    # Add any other preview URLs here if needed, e.g.:
+    # "https://mosianedi-frontend-git-main.vercel.app" 
+]
 
-# -------------------------------------------------------------------
-# MIDDLEWARE
-# -------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all — adjust for production
-    allow_credentials=True,
+    allow_origins=origins,        # 👈 Specific origins, not ["*"]
+    allow_credentials=True,       # Required for Supabase Auth headers
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# -------------------------------------------------------------------
+# 5. Register Routes
+# -------------------------------------------------------------------
+app.include_router(projects_router, prefix="/api/v1/projects", tags=["Projects"])
+app.include_router(proposal_data_router, prefix="/api/v1/projects", tags=["Proposal Inputs"])
+app.include_router(network_snapshot_router, prefix="/api/v1/projects", tags=["Network Snapshot"])
+app.include_router(scenarios_router, prefix="/api/v1/projects", tags=["Forecast & Strategy"])
+app.include_router(computation_router, prefix="/api/v1/projects", tags=["Computation Engine"])
+app.include_router(ai_router.router, prefix="/api/v1/projects", tags=["AI Advisor"])
 
 # -------------------------------------------------------------------
-# ROUTES
+# 6. Health Check
 # -------------------------------------------------------------------
-app.include_router(
-    projects.router,
-    prefix="/api/v1/projects",
-    tags=["Projects"],
-)
+@app.get("/api/health") # Renamed for clarity, often useful to have under /api
+def health_check():
+    return {"status": "online", "version": "1.0.0"}
 
-app.include_router(
-    master_data_router,
-    prefix="/api/v1/projects",
-    tags=["Master Data"],
-)
-
-app.include_router(
-    network_snapshot_router, 
-    prefix="/api/v1/projects", 
-    tags=["Network"]
-)
-
-app.include_router(
-    scenarios_router, 
-    prefix="/api/v1/projects", 
-    tags=["Scenarios"]
-)
-
-
-app.include_router(
-    computation_router,
-    prefix="/api/v1/projects",
-    tags=["Computation"]
-)
-# Uncomment when the dashboards module is ready
-app.include_router(
-    dashboards_router, 
-    prefix="/api/v1/projects", 
-    tags=["Dashboards"]
-)
-
-app.include_router(
-    provincial_stats.router, 
-    prefix="/api/v1/provincial-stats", 
-    tags=["Provincial Stats"]
-)
-
-# -------------------------------------------------------------------
-# ROOT PING / HEALTHCHECK
-# -------------------------------------------------------------------
 @app.get("/")
 def read_root():
     return {
-        "status": "ok",
-        "service": "Mosianedi Investment API"
+        "status": "online",
+        "service": "Mosianedi Investment API",
+        "version": "1.0.0"
     }--- ./proposal_data/service.py ---
-from typing import Dict, Any
 from .schemas import ProposalDataPayload
 
+def compute_paved_total(p: ProposalDataPayload) -> float:
+    return p.paved_arid + p.paved_semi_arid + p.paved_dry_sub_humid + p.paved_moist_sub_humid + p.paved_humid
 
-def compute_total_km(p: ProposalDataPayload) -> float:
-    return (
-        p.km_arid
-        + p.km_semi_arid
-        + p.km_dry_sub_humid
-        + p.km_moist_sub_humid
-        + p.km_humid
-    )
-
-
-def to_inputs_payload(p: ProposalDataPayload) -> Dict[str, Any]:
-    # Store as JSON in projects.inputs_payload for demo speed (no new tables needed)
-    return {
-        "km_arid": p.km_arid,
-        "km_semi_arid": p.km_semi_arid,
-        "km_dry_sub_humid": p.km_dry_sub_humid,
-        "km_moist_sub_humid": p.km_moist_sub_humid,
-        "km_humid": p.km_humid,
-        "avg_vci": p.avg_vci,
-        "vehicle_km": p.vehicle_km,
-        "pct_vehicle_km_used": p.pct_vehicle_km_used,
-        "fuel_sales": p.fuel_sales,
-        "notes": p.notes,
-        "extra_inputs": p.extra_inputs or {},
-    }
-
-
-def from_inputs_payload(d: Dict[str, Any]) -> ProposalDataPayload:
-    # Defensive defaults so GET works even when nothing saved yet
-    return ProposalDataPayload(
-        km_arid=float(d.get("km_arid", 0) or 0),
-        km_semi_arid=float(d.get("km_semi_arid", 0) or 0),
-        km_dry_sub_humid=float(d.get("km_dry_sub_humid", 0) or 0),
-        km_moist_sub_humid=float(d.get("km_moist_sub_humid", 0) or 0),
-        km_humid=float(d.get("km_humid", 0) or 0),
-        avg_vci=float(d.get("avg_vci", 0) or 0),
-        vehicle_km=float(d.get("vehicle_km", 0) or 0),
-        pct_vehicle_km_used=float(d.get("pct_vehicle_km_used", 0) or 0),
-        fuel_sales=float(d.get("fuel_sales", 0) or 0),
-        notes=d.get("notes"),
-        extra_inputs=d.get("extra_inputs") or {},
-    )
+def compute_gravel_total(p: ProposalDataPayload) -> float:
+    return p.gravel_arid + p.gravel_semi_arid + p.gravel_dry_sub_humid + p.gravel_moist_sub_humid + p.gravel_humid
 --- ./proposal_data/__init__.py ---
-# app/master_data/__init__.py
-from .router import router
-
-__all__ = ["router"]--- ./proposal_data/schemas.py ---
-from pydantic import BaseModel, Field
+from .router import router--- ./proposal_data/schemas.py ---
+from pydantic import BaseModel
 from typing import Optional, Dict, Any
+from datetime import datetime
+from uuid import UUID
 
 
-class ProposalDataPayload(BaseModel):
-    # Climate zone km
-    km_arid: float = Field(0, ge=0)
-    km_semi_arid: float = Field(0, ge=0)
-    km_dry_sub_humid: float = Field(0, ge=0)
-    km_moist_sub_humid: float = Field(0, ge=0)
-    km_humid: float = Field(0, ge=0)
+class ProposalDataOut(BaseModel):
+    id: UUID
+    project_id: UUID
+    user_id: UUID
+    data_source: str
 
-    # Indicators
-    avg_vci: float = Field(0, ge=0)
-    vehicle_km: float = Field(0, ge=0)
-    pct_vehicle_km_used: float = Field(0, ge=0, le=100)
-    fuel_sales: float = Field(0, ge=0)
+    paved_arid: float = 0
+    paved_semi_arid: float = 0
+    paved_dry_sub_humid: float = 0
+    paved_moist_sub_humid: float = 0
+    paved_humid: float = 0
 
-    notes: Optional[str] = None
+    gravel_arid: float = 0
+    gravel_semi_arid: float = 0
+    gravel_dry_sub_humid: float = 0
+    gravel_moist_sub_humid: float = 0
+    gravel_humid: float = 0
+
+    avg_vci_used: float = 0
+    vehicle_km: float = 0
+    pct_vehicle_km_used: float = 0
+    fuel_sales: float = 0
+    pct_fuel_sales_used: float = 0
+    fuel_option_selected: int = 1
+    target_vci: float = 45
+
     extra_inputs: Dict[str, Any] = {}
+    created_at: datetime
+    updated_at: datetime
 
 
-class ProposalDataResponse(BaseModel):
-    project_id: str
-    user_id: str
-    total_km: float
-    payload: ProposalDataPayload
-    updated_at: Optional[str] = None
---- ./proposal_data/router.py ---
+class ProposalDataPatch(BaseModel):
+    # allow partial updates
+    paved_arid: Optional[float] = None
+    paved_semi_arid: Optional[float] = None
+    paved_dry_sub_humid: Optional[float] = None
+    paved_moist_sub_humid: Optional[float] = None
+    paved_humid: Optional[float] = None
+
+    gravel_arid: Optional[float] = None
+    gravel_semi_arid: Optional[float] = None
+    gravel_dry_sub_humid: Optional[float] = None
+    gravel_moist_sub_humid: Optional[float] = None
+    gravel_humid: Optional[float] = None
+
+    avg_vci_used: Optional[float] = None
+    vehicle_km: Optional[float] = None
+    pct_vehicle_km_used: Optional[float] = None
+    fuel_sales: Optional[float] = None
+    pct_fuel_sales_used: Optional[float] = None
+    fuel_option_selected: Optional[int] = None
+    target_vci: Optional[float] = None
+
+    extra_inputs: Optional[Dict[str, Any]] = None
+    
+    --- ./proposal_data/router.py ---
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
-from app.routers.projects import get_db_connection  # uses your existing helper
-from app.auth import get_current_user  # adjust import to your project
-from .schemas import ProposalDataPayload, ProposalDataResponse
-from . import repository
-from .service import compute_total_km, to_inputs_payload, from_inputs_payload
+from typing import Dict, Any
 
-router = APIRouter(prefix="/projects", tags=["proposal-data"])
+from app.routers.projects import get_current_user_id, get_db_connection
+from .schemas import ProposalDataOut, ProposalDataPatch
 
+router = APIRouter()
 
-@router.get("/{project_id}/proposal-data", response_model=ProposalDataResponse)
-def read_proposal_data(project_id: str, user=Depends(get_current_user)):
-    conn = get_db_connection()
-    try:
-        row = repository.get_proposal_data(conn, project_id, user["id"])
-        if not row:
-            raise HTTPException(status_code=404, detail="Project not found")
+def _row_to_dict(cur, row) -> Dict[str, Any]:
+    cols = [desc[0] for desc in cur.description]
+    return dict(zip(cols, row))
 
-        payload = from_inputs_payload(row["inputs_payload"])
-        return ProposalDataResponse(
-            project_id=project_id,
-            user_id=str(user["id"]),
-            total_km=compute_total_km(payload),
-            payload=payload,
-            updated_at=row.get("updated_at"),
-        )
-    finally:
-        conn.close()
+def _ensure_row(project_id: UUID, user_id: str) -> None:
+    sql = """
+        INSERT INTO public.proposal_data (project_id, user_id, data_source)
+        VALUES (%s, %s, 'manual')
+        ON CONFLICT (project_id) DO NOTHING;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), user_id))
+        conn.commit()
 
+@router.get(
+    "/{project_id}/proposal-data",
+    response_model=ProposalDataOut,
+    summary="Get proposal inputs for a project",
+)
+def get_proposal_data(project_id: UUID, user_id: str = Depends(get_current_user_id)):
+    # ensure row exists (covers old projects)
+    _ensure_row(project_id, user_id)
 
-@router.put("/{project_id}/proposal-data", response_model=ProposalDataResponse)
-def save_proposal_data(project_id: str, body: ProposalDataPayload, user=Depends(get_current_user)):
-    conn = get_db_connection()
-    try:
+    sql = """
+        SELECT *
+        FROM public.proposal_data
+        WHERE project_id = %s AND user_id = %s
+        LIMIT 1;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), user_id))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "proposal_data row not found after ensure (unexpected).")
+            return _row_to_dict(cur, row)
+
+@router.patch(
+    "/{project_id}/proposal-data",
+    response_model=ProposalDataOut,
+    summary="Update proposal inputs for a project",
+)
+def patch_proposal_data(
+    project_id: UUID,
+    payload: ProposalDataPatch,
+    user_id: str = Depends(get_current_user_id),
+):
+    # ensure row exists (covers old projects)
+    _ensure_row(project_id, user_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(400, "No fields provided")
+
+    set_parts = []
+    values = []
+    for k, v in data.items():
+        set_parts.append(f"{k} = %s")
+        values.append(v)
+
+    set_clause = ", ".join(set_parts)
+
+    sql = f"""
+        UPDATE public.proposal_data
+        SET {set_clause}, updated_at = now()
+        WHERE project_id = %s AND user_id = %s
+        RETURNING *;
+    """
+
+    with get_db_connection() as conn:
         try:
-            validate_or_raise(body)
-        except ProposalValidationError as e:
-            # 422 is standard for validation errors
-            raise HTTPException(status_code=422, detail={"errors": e.errors})
-
-        saved = repository.save_proposal_data(conn, project_id, user["id"], to_inputs_payload(body))
-        payload = from_inputs_payload(saved["inputs_payload"])
-        return ProposalDataResponse(
-            project_id=project_id,
-            user_id=str(user["id"]),
-            total_km=compute_total_km(payload),
-            payload=payload,
-            updated_at=saved.get("updated_at"),
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    finally:
-        conn.close()
---- ./proposal_data/repository.py ---
+            with conn.cursor() as cur:
+                cur.execute(sql, (*values, str(project_id), user_id))
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(404, "proposal_data row not found for this project/user")
+                conn.commit()
+                return _row_to_dict(cur, row)
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(500, f"Failed to update proposal_data: {str(e)}")
+        --- ./proposal_data/repository.py ---
 from typing import Optional, Dict, Any
 from datetime import datetime
 
+def assert_project_owned(conn, project_id: str, user_id: str) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM public.projects WHERE id = %s AND user_id = %s",
+        (project_id, user_id),
+    )
+    ok = cur.fetchone()
+    cur.close()
+    if not ok:
+        raise ValueError("Project not found or not owned by user")
 
 def get_proposal_data(conn, project_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    # ownership check
+    assert_project_owned(conn, project_id, user_id)
+
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT inputs_payload, updated_at
-        FROM public.projects
-        WHERE id = %s AND user_id = %s
+        SELECT
+          paved_arid, paved_semi_arid, paved_dry_sub_humid, paved_moist_sub_humid, paved_humid,
+          gravel_arid, gravel_semi_arid, gravel_dry_sub_humid, gravel_moist_sub_humid, gravel_humid,
+          avg_vci_used, vehicle_km, pct_vehicle_km_used,
+          fuel_sales, pct_fuel_sales_used, fuel_option_selected, target_vci,
+          extra_inputs, updated_at
+        FROM public.proposal_data
+        WHERE project_id = %s AND user_id = %s
         """,
         (project_id, user_id),
     )
     row = cur.fetchone()
+    cols = [d[0] for d in cur.description]
     cur.close()
+
     if not row:
         return None
 
-    inputs_payload, updated_at = row
-    return {
-        "inputs_payload": inputs_payload or {},
-        "updated_at": updated_at.isoformat() if isinstance(updated_at, datetime) else updated_at,
-    }
+    data = dict(zip(cols, row))
+    updated_at = data.get("updated_at")
+    if isinstance(updated_at, datetime):
+        data["updated_at"] = updated_at.isoformat()
 
+    return data
 
-def save_proposal_data(conn, project_id: str, user_id: str, inputs_payload: Dict[str, Any]) -> Dict[str, Any]:
+def upsert_proposal_data(conn, project_id: str, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    assert_project_owned(conn, project_id, user_id)
+
     cur = conn.cursor()
     cur.execute(
         """
-        UPDATE public.projects
-        SET inputs_payload = %s,
-            updated_at = now()
-        WHERE id = %s AND user_id = %s
-        RETURNING inputs_payload, updated_at
+        INSERT INTO public.proposal_data (
+          project_id, user_id, data_source,
+          paved_arid, paved_semi_arid, paved_dry_sub_humid, paved_moist_sub_humid, paved_humid,
+          gravel_arid, gravel_semi_arid, gravel_dry_sub_humid, gravel_moist_sub_humid, gravel_humid,
+          avg_vci_used, vehicle_km, pct_vehicle_km_used,
+          fuel_sales, pct_fuel_sales_used, fuel_option_selected, target_vci,
+          extra_inputs, updated_at
+        )
+        VALUES (
+          %s, %s, 'manual',
+          %s, %s, %s, %s, %s,
+          %s, %s, %s, %s, %s,
+          %s, %s, %s,
+          %s, %s, %s, %s,
+          %s, now()
+        )
+        ON CONFLICT (project_id)
+        DO UPDATE SET
+          user_id = EXCLUDED.user_id,
+          data_source = EXCLUDED.data_source,
+
+          paved_arid = EXCLUDED.paved_arid,
+          paved_semi_arid = EXCLUDED.paved_semi_arid,
+          paved_dry_sub_humid = EXCLUDED.paved_dry_sub_humid,
+          paved_moist_sub_humid = EXCLUDED.paved_moist_sub_humid,
+          paved_humid = EXCLUDED.paved_humid,
+
+          gravel_arid = EXCLUDED.gravel_arid,
+          gravel_semi_arid = EXCLUDED.gravel_semi_arid,
+          gravel_dry_sub_humid = EXCLUDED.gravel_dry_sub_humid,
+          gravel_moist_sub_humid = EXCLUDED.gravel_moist_sub_humid,
+          gravel_humid = EXCLUDED.gravel_humid,
+
+          avg_vci_used = EXCLUDED.avg_vci_used,
+          vehicle_km = EXCLUDED.vehicle_km,
+          pct_vehicle_km_used = EXCLUDED.pct_vehicle_km_used,
+
+          fuel_sales = EXCLUDED.fuel_sales,
+          pct_fuel_sales_used = EXCLUDED.pct_fuel_sales_used,
+          fuel_option_selected = EXCLUDED.fuel_option_selected,
+          target_vci = EXCLUDED.target_vci,
+
+          extra_inputs = EXCLUDED.extra_inputs,
+          updated_at = now()
+        RETURNING
+          paved_arid, paved_semi_arid, paved_dry_sub_humid, paved_moist_sub_humid, paved_humid,
+          gravel_arid, gravel_semi_arid, gravel_dry_sub_humid, gravel_moist_sub_humid, gravel_humid,
+          avg_vci_used, vehicle_km, pct_vehicle_km_used,
+          fuel_sales, pct_fuel_sales_used, fuel_option_selected, target_vci,
+          extra_inputs, updated_at
         """,
-        (inputs_payload, project_id, user_id),
+        (
+            project_id, user_id,
+            payload["paved_arid"], payload["paved_semi_arid"], payload["paved_dry_sub_humid"], payload["paved_moist_sub_humid"], payload["paved_humid"],
+            payload["gravel_arid"], payload["gravel_semi_arid"], payload["gravel_dry_sub_humid"], payload["gravel_moist_sub_humid"], payload["gravel_humid"],
+            payload["avg_vci_used"], payload["vehicle_km"], payload["pct_vehicle_km_used"],
+            payload["fuel_sales"], payload["pct_fuel_sales_used"], payload["fuel_option_selected"], payload["target_vci"],
+            payload["extra_inputs"],
+        ),
     )
+
     row = cur.fetchone()
+    cols = [d[0] for d in cur.description]
     conn.commit()
     cur.close()
 
-    if not row:
-        raise ValueError("Project not found or not owned by user")
+    data = dict(zip(cols, row))
+    updated_at = data.get("updated_at")
+    if isinstance(updated_at, datetime):
+        data["updated_at"] = updated_at.isoformat()
 
-    payload, updated_at = row
-    return {
-        "inputs_payload": payload or {},
-        "updated_at": updated_at.isoformat() if isinstance(updated_at, datetime) else updated_at,
-    }
+    return data
 --- ./proposal_data/validation.py ---
 from typing import Dict, Any, List, Tuple
 from .schemas import ProposalDataPayload
-
+from .service import compute_paved_total, compute_gravel_total
 
 class ProposalValidationError(Exception):
     def __init__(self, errors: List[Dict[str, Any]]):
         super().__init__("Proposal data validation failed")
         self.errors = errors
 
-
 def validate_proposal_data(payload: ProposalDataPayload) -> Tuple[bool, List[Dict[str, Any]]]:
-    """
-    Returns (ok, errors). Each error is:
-      { "field": "<field or group>", "message": "<human readable>", "code": "<stable_code>" }
-    """
     errors: List[Dict[str, Any]] = []
+    total = compute_paved_total(payload) + compute_gravel_total(payload)
 
-    # Compute total km (business rule)
-    total_km = (
-        payload.km_arid
-        + payload.km_semi_arid
-        + payload.km_dry_sub_humid
-        + payload.km_moist_sub_humid
-        + payload.km_humid
-    )
+    if total <= 0:
+        errors.append({"field": "total_lane_km", "message": "Total network length must be > 0.", "code": "TOTAL_LANE_KM_ZERO"})
 
-    if total_km <= 0:
-        errors.append(
-            {
-                "field": "climate_km_total",
-                "message": "Total climate kilometres must be greater than 0.",
-                "code": "CLIMATE_TOTAL_ZERO",
-            }
-        )
+    if payload.avg_vci_used <= 0:
+        errors.append({"field": "avg_vci_used", "message": "Average VCI must be > 0.", "code": "AVG_VCI_REQUIRED"})
 
-    # Soft sanity checks (still allow save, but you can decide to treat as errors)
-    # For demo simplicity, keep as errors only if obviously invalid.
-    if payload.avg_vci == 0:
-        errors.append(
-            {
-                "field": "avg_vci",
-                "message": "Average VCI is 0. If unknown, enter an estimate rather than 0.",
-                "code": "AVG_VCI_ZERO",
-            }
-        )
+    if payload.vehicle_km <= 0:
+        errors.append({"field": "vehicle_km", "message": "Vehicle-km must be > 0.", "code": "VEHICLE_KM_REQUIRED"})
 
-    # vehicle_km can be 0 in some edge cases, but usually indicates missing data
-    if payload.vehicle_km == 0:
-        errors.append(
-            {
-                "field": "vehicle_km",
-                "message": "Vehicle-km is 0. If unknown, enter an estimate rather than 0.",
-                "code": "VEHICLE_KM_ZERO",
-            }
-        )
+    if payload.fuel_sales <= 0:
+        errors.append({"field": "fuel_sales", "message": "Fuel sales must be > 0.", "code": "FUEL_SALES_REQUIRED"})
 
-    ok = len(errors) == 0
-    return ok, errors
+    if payload.fuel_option_selected not in (1, 2):
+        errors.append({"field": "fuel_option_selected", "message": "Fuel option must be 1 or 2.", "code": "INVALID_FUEL_OPTION"})
 
+    return (len(errors) == 0), errors
 
 def validate_or_raise(payload: ProposalDataPayload) -> None:
     ok, errors = validate_proposal_data(payload)
