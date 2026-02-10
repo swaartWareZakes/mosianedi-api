@@ -5,7 +5,8 @@ from uuid import UUID
 from typing import List
 from psycopg2.extras import Json
 
-from app.routers.projects import get_current_user_id, get_db_connection
+# --- 👇 UPDATE THIS IMPORT ---
+from app.dependencies import get_current_user_id, get_db_connection
 from .service import generate_strategic_narrative
 from .schemas import AiInsightOut
 
@@ -21,8 +22,8 @@ def _assert_project_owned(cur, project_id: UUID, user_id: str) -> str:
     """
     cur.execute(
         """
-        SELECT project_name
-        FROM public.projects
+        SELECT project_name 
+        FROM public.projects 
         WHERE id = %s AND user_id = %s
         """,
         (str(project_id), user_id),
@@ -69,7 +70,7 @@ def generate_and_save_ai_feedback(
 
             if not active_run_id:
                 raise HTTPException(
-                    status_code=400,
+                    status_code=400, 
                     detail="No active simulation run selected. Please run a simulation first.",
                 )
 
@@ -124,11 +125,11 @@ def generate_and_save_ai_feedback(
 
             # F) Save to DB
             sql_insert = """
-                INSERT INTO public.ai_insights
+                INSERT INTO public.ai_insights 
                     (project_id, simulation_run_id, content, status, created_by, insight_type, model, prompt_version)
-                VALUES
+                VALUES 
                     (%s, %s, %s, 'final', %s, 'treasury_narrative', %s, %s)
-                RETURNING
+                RETURNING 
                     id, project_id, simulation_run_id, content, status, created_at, created_by, insight_type;
             """
 
@@ -178,12 +179,12 @@ def list_ai_history(
             _assert_project_owned(cur, project_id, user_id)
 
             sql = """
-                SELECT
-                    ai.id, ai.project_id, ai.simulation_run_id,
+                SELECT 
+                    ai.id, ai.project_id, ai.simulation_run_id, 
                     ai.content, ai.status, ai.created_at, ai.created_by, ai.insight_type,
                     sr.run_name, sr.results_payload
                 FROM public.ai_insights ai
-                LEFT JOIN public.simulation_results sr
+                LEFT JOIN public.simulation_results sr 
                     ON ai.simulation_run_id = sr.id
                 WHERE ai.project_id = %s
                 ORDER BY ai.created_at DESC

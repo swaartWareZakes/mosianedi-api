@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from uuid import UUID
 from typing import List
 
-from app.routers.projects import get_current_user_id
+# --- 👇 UPDATE THIS IMPORT ---
+from app.dependencies import get_current_user_id
 from .schemas import ReportCreate, ReportOut
 from . import repository
 

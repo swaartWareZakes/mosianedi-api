@@ -3,8 +3,8 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from psycopg2.extras import Json
-
-from app.routers.projects import get_db_connection
+# --- CHANGED IMPORT BELOW ---
+from app.dependencies import get_db_connection
 
 
 def list_dashboards_for_project(
@@ -12,10 +12,10 @@ def list_dashboards_for_project(
     user_id: str,
 ) -> List[Dict[str, Any]]:
     sql = """
-        SELECT
-            id, project_id, user_id,
-            name, description, is_favorite,
-            layout, overrides,
+        SELECT 
+            id, project_id, user_id, 
+            name, description, is_favorite, 
+            layout, overrides, 
             created_at, updated_at
         FROM public.project_dashboards
         WHERE project_id = %s AND user_id = %s
@@ -36,10 +36,10 @@ def fetch_dashboard(
     user_id: str,
 ) -> Optional[Dict[str, Any]]:
     sql = """
-        SELECT
-            id, project_id, user_id,
-            name, description, is_favorite,
-            layout, overrides,
+        SELECT 
+            id, project_id, user_id, 
+            name, description, is_favorite, 
+            layout, overrides, 
             created_at, updated_at
         FROM public.project_dashboards
         WHERE id = %s AND project_id = %s AND user_id = %s
@@ -61,15 +61,15 @@ def insert_dashboard(
 ) -> Dict[str, Any]:
     sql = """
         INSERT INTO public.project_dashboards (
-            project_id, user_id,
-            name, description, is_favorite,
+            project_id, user_id, 
+            name, description, is_favorite, 
             layout, overrides
         )
         VALUES (%s,%s,%s,%s,%s,%s,%s)
-        RETURNING
-            id, project_id, user_id,
-            name, description, is_favorite,
-            layout, overrides,
+        RETURNING 
+            id, project_id, user_id, 
+            name, description, is_favorite, 
+            layout, overrides, 
             created_at, updated_at;
     """
     with get_db_connection() as conn, conn.cursor() as cur:
@@ -99,7 +99,7 @@ def update_dashboard(
 ) -> Optional[Dict[str, Any]]:
     sql = """
         UPDATE public.project_dashboards
-        SET
+        SET 
             name = COALESCE(%s, name),
             description = COALESCE(%s, description),
             is_favorite = COALESCE(%s, is_favorite),
@@ -107,10 +107,10 @@ def update_dashboard(
             overrides = COALESCE(%s, overrides),
             updated_at = now()
         WHERE id = %s AND project_id = %s AND user_id = %s
-        RETURNING
-            id, project_id, user_id,
-            name, description, is_favorite,
-            layout, overrides,
+        RETURNING 
+            id, project_id, user_id, 
+            name, description, is_favorite, 
+            layout, overrides, 
             created_at, updated_at;
     """
     with get_db_connection() as conn, conn.cursor() as cur:

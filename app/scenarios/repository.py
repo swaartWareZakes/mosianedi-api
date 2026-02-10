@@ -1,6 +1,7 @@
 from uuid import UUID
 from typing import Dict, Any, Optional
-from app.routers.projects import get_db_connection
+# --- CHANGED IMPORT BELOW ---
+from app.dependencies import get_db_connection
 
 def ensure_assumptions_row(project_id: UUID, user_id: str) -> None:
     """
@@ -19,9 +20,9 @@ def ensure_assumptions_row(project_id: UUID, user_id: str) -> None:
 def get_forecast_params(project_id: UUID, user_id: str) -> Optional[Dict[str, Any]]:
     sql = """
         SELECT 
-            id, project_id, updated_at,
-            analysis_duration, discount_rate,
-            cpi_percentage, previous_allocation,
+            id, project_id, updated_at, 
+            analysis_duration, discount_rate, 
+            cpi_percentage, previous_allocation, 
             paved_deterioration_rate, gravel_loss_rate, climate_stress_factor
         FROM public.scenario_assumptions
         WHERE project_id = %s AND user_id = %s
@@ -51,9 +52,9 @@ def update_forecast_params(project_id: UUID, user_id: str, data: Dict[str, Any])
         SET {", ".join(set_clauses)}, updated_at = NOW()
         WHERE project_id = %s AND user_id = %s
         RETURNING 
-            id, project_id, updated_at,
-            analysis_duration, discount_rate,
-            cpi_percentage, previous_allocation,
+            id, project_id, updated_at, 
+            analysis_duration, discount_rate, 
+            cpi_percentage, previous_allocation, 
             paved_deterioration_rate, gravel_loss_rate, climate_stress_factor
     """
     

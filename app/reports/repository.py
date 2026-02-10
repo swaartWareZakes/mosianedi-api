@@ -5,7 +5,8 @@ from uuid import UUID
 from typing import List, Dict, Any, Optional
 
 from psycopg2.extras import Json
-from app.routers.projects import get_db_connection
+# --- 👇 UPDATE THIS IMPORT ---
+from app.dependencies import get_db_connection
 
 
 # -----------------------------------------------------------------------------
@@ -34,11 +35,11 @@ def create_report(project_id: UUID, user_id: str, payload: Dict[str, Any]) -> Di
     Returns basic metadata + slug.
     """
     sql = """
-        INSERT INTO public.reports
+        INSERT INTO public.reports 
             (project_id, simulation_run_id, ai_insight_id, title, report_type, config, created_by, public_share_slug)
-        VALUES
+        VALUES 
             (%s, %s, %s, %s, %s, %s, %s, %s)
-        RETURNING
+        RETURNING 
             id, project_id, title, report_type, status, public_share_slug, created_at;
     """
 
@@ -101,7 +102,7 @@ def get_full_report_data(report_id: UUID) -> Optional[Dict[str, Any]]:
     Used by secure view and public view.
     """
     sql = """
-        SELECT
+        SELECT 
             r.id, r.project_id, r.title, r.report_type, r.status, r.public_share_slug, r.created_at,
             p.project_name, p.province,
             sr.results_payload as simulation_data,

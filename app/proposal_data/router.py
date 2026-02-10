@@ -2,7 +2,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from typing import Dict, Any
 
-from app.routers.projects import get_current_user_id, get_db_connection
+# --- CHANGED IMPORT BELOW ---
+from app.dependencies import get_current_user_id, get_db_connection 
 from .schemas import ProposalDataOut, ProposalDataPatch
 
 router = APIRouter()
@@ -13,7 +14,7 @@ def _row_to_dict(cur, row) -> Dict[str, Any]:
 
 def _ensure_row(project_id: UUID, user_id: str) -> None:
     sql = """
-        INSERT INTO public.proposal_data (project_id, user_id, data_source)
+        INSERT INTO public.proposal_data (project_id, user_id, data_source) 
         VALUES (%s, %s, 'manual')
         ON CONFLICT (project_id) DO NOTHING;
     """
@@ -32,8 +33,7 @@ def get_proposal_data(project_id: UUID, user_id: str = Depends(get_current_user_
     _ensure_row(project_id, user_id)
 
     sql = """
-        SELECT *
-        FROM public.proposal_data
+        SELECT * FROM public.proposal_data 
         WHERE project_id = %s AND user_id = %s
         LIMIT 1;
     """
@@ -51,8 +51,8 @@ def get_proposal_data(project_id: UUID, user_id: str = Depends(get_current_user_
     summary="Update proposal inputs for a project",
 )
 def patch_proposal_data(
-    project_id: UUID,
-    payload: ProposalDataPatch,
+    project_id: UUID, 
+    payload: ProposalDataPatch, 
     user_id: str = Depends(get_current_user_id),
 ):
     # ensure row exists (covers old projects)
@@ -67,7 +67,7 @@ def patch_proposal_data(
     for k, v in data.items():
         set_parts.append(f"{k} = %s")
         values.append(v)
-
+    
     set_clause = ", ".join(set_parts)
 
     sql = f"""
@@ -92,4 +92,3 @@ def patch_proposal_data(
         except Exception as e:
             conn.rollback()
             raise HTTPException(500, f"Failed to update proposal_data: {str(e)}")
-        

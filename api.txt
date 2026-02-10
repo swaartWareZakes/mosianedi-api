@@ -1,0 +1,3146 @@
+\n--- ./app/routers/provincial_stats.py ---\n
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
+from pydantic import BaseModel
+from typing import List, Optional
+from uuid import UUID
+import pandas as pd
+import io
+from app.routers.projects import get_db_connection, get_current_user_id
+
+router = APIRouter()
+
+# --- SCHEMAS --------------------------------------------------------
+class ProvincialStatUpdate(BaseModel):
+    province_name: str
+    km_arid: Optional[float] = 0
+    km_semi_arid: Optional[float] = 0
+    km_dry_sub_humid: Optional[float] = 0
+    km_moist_sub_humid: Optional[float] = 0
+    km_humid: Optional[float] = 0
+    avg_vci: Optional[float] = 0
+    vehicle_km: Optional[float] = 0
+    fuel_sales: Optional[float] = 0
+
+class ProvincialStatResponse(ProvincialStatUpdate):
+    id: UUID
+    project_id: UUID
+
+# --- ENDPOINTS ------------------------------------------------------
+
+@router.get("/{project_id}", response_model=List[ProvincialStatResponse])
+def get_stats(project_id: UUID, user_id: str = Depends(get_current_user_id)):
+    """
+    Returns the 9 rows. They are guaranteed to exist because of the SQL trigger.
+    """
+    sql = """
+        SELECT * FROM public.provincial_stats
+        WHERE project_id = %s
+        ORDER BY province_name ASC;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id),))
+            rows = cur.fetchall()
+            cols = [desc[0] for desc in cur.description]
+            return [dict(zip(cols, row)) for row in rows]
+
+@router.post("/{project_id}", status_code=200)
+def save_manual_input(
+    project_id: UUID, 
+    stats: List[ProvincialStatUpdate], 
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    Saves user edits from the grid.
+    Uses 'UPDATE' because the rows already exist.
+    """
+    sql = """
+        UPDATE public.provincial_stats
+        SET 
+            km_arid = %s, km_semi_arid = %s, km_dry_sub_humid = %s, 
+            km_moist_sub_humid = %s, km_humid = %s,
+            avg_vci = %s, vehicle_km = %s, fuel_sales = %s,
+            updated_at = NOW()
+        WHERE project_id = %s AND province_name = %s;
+    """
+    
+    values = []
+    for s in stats:
+        values.append((
+            s.km_arid, s.km_semi_arid, s.km_dry_sub_humid, 
+            s.km_moist_sub_humid, s.km_humid,
+            s.avg_vci, s.vehicle_km, s.fuel_sales,
+            str(project_id), s.province_name
+        ))
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Execute batch update
+            cur.executemany(sql, values)
+            conn.commit()
+            
+    return {"message": "Saved successfully"}
+
+@router.post("/{project_id}/upload")
+def upload_stats_csv(
+    project_id: UUID, 
+    file: UploadFile = File(...), 
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    Parses 'Book1.csv' and updates the existing 9 rows.
+    """
+    try:
+        contents = file.file.read()
+        if file.filename.endswith('.csv'):
+            df = pd.read_csv(io.BytesIO(contents), header=None)
+        else:
+            df = pd.read_excel(io.BytesIO(contents), header=None)
+
+        # Basic Cleanup tailored to your CSV structure
+        df = df.iloc[3:] # Skip headers
+        df = df[df[0].notna()] # Remove empty lines
+        
+        updates = []
+        for _, row in df.iterrows():
+            prov_name = str(row[0]).strip()
+            # Skip totals/junk
+            if "Total" in prov_name or "Province" in prov_name:
+                continue
+
+            def parse(val):
+                if isinstance(val, (int, float)): return val
+                if isinstance(val, str):
+                    clean = val.replace('R','').replace(',','').replace(' ','').replace('%','')
+                    try: return float(clean)
+                    except: return 0
+                return 0
+
+            # Map CSV Columns to DB Columns
+            updates.append((
+                parse(row[1]), parse(row[2]), parse(row[3]), parse(row[4]), parse(row[5]), # Climate Kms
+                parse(row[7]), parse(row[8]), parse(row[10]), # VCI, VehKm, Fuel
+                str(project_id), prov_name # WHERE clause
+            ))
+
+        sql = """
+            UPDATE public.provincial_stats
+            SET 
+                km_arid=%s, km_semi_arid=%s, km_dry_sub_humid=%s, km_moist_sub_humid=%s, km_humid=%s,
+                avg_vci=%s, vehicle_km=%s, fuel_sales=%s, updated_at=NOW()
+            WHERE project_id=%s AND province_name=%s;
+        """
+
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(sql, updates)
+                conn.commit()
+
+        return {"message": "Spreadsheet data imported"}
+
+    except Exception as e:
+        raise HTTPException(400, f"Upload Error: {str(e)}")\n--- ./app/routers/__init__.py ---\n
+\n--- ./app/routers/master_data.py ---\n
+# """
+# Master Data Upload, Validation, History & Preview Endpoints
+# ===========================================================
+
+# Clean, modular, production-ready version.
+# """
+
+# from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+# from typing import Optional, Dict, Any, List
+# from uuid import UUID
+# from io import BytesIO
+
+# import pandas as pd
+# import psycopg2
+# from psycopg2.extras import Json
+
+# from pydantic import BaseModel
+
+# # Shared helpers
+# from app.routers.projects import get_db_connection, get_current_user_id
+# from app.db.schemas import MasterDataUploadStatus
+
+
+# # ============================================================
+# # PREVIEW SCHEMAS
+# # ============================================================
+
+# class DataPreviewResponse(BaseModel):
+#     preview_data: List[Dict[str, Any]]
+#     total_rows: int
+#     columns: List[str]
+
+
+# # ============================================================
+# # REQUIRED COLUMNS FOR MASTER DATA
+# # ============================================================
+
+# REQUIRED_COLUMNS = {
+#     "segment_id",
+#     "road_id",
+#     "road_class",
+#     "length_km",
+#     "surface_type",
+# }
+
+# router = APIRouter()
+
+
+# # ============================================================
+# # HELPERS
+# # ============================================================
+
+# def _parse_master_data_file(file_bytes: bytes, filename: str) -> pd.DataFrame:
+#     """
+#     Convert uploaded Excel/CSV file → pandas DataFrame.
+#     """
+#     buffer = BytesIO(file_bytes)
+#     name = filename.lower()
+
+#     try:
+#         if name.endswith((".xlsx", ".xls")):
+#             return pd.read_excel(buffer)
+#         elif name.endswith(".csv"):
+#             return pd.read_csv(buffer)
+#         else:
+#             raise HTTPException(
+#                 status_code=400,
+#                 detail="Invalid file type. Use .xlsx, .xls or .csv."
+#             )
+#     except Exception as e:
+#         raise HTTPException(
+#             status_code=400,
+#             detail=f"Could not parse file: {str(e)}"
+#         )
+
+
+# # ============================================================
+# # UPLOAD ENDPOINT
+# # ============================================================
+
+# @router.post("/{project_id}/master-data/upload", response_model=MasterDataUploadStatus)
+# async def upload_master_data(
+#     project_id: UUID,
+#     file: UploadFile = File(...),
+#     user_id: str = Depends(get_current_user_id),
+# ):
+#     """
+#     Upload + validate a master data file.
+#     Saves the file blob inline in PostgreSQL.
+#     """
+#     file_bytes = await file.read()
+#     if not file_bytes:
+#         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+#     mime_type = file.content_type or "application/octet-stream"
+#     file_size = len(file_bytes)
+
+#     validation_errors: Dict[str, Any] = {}
+#     status = "validated"
+#     row_count: Optional[int] = None
+
+#     # ---- VALIDATION ----
+#     try:
+#         df = _parse_master_data_file(file_bytes, file.filename)
+#         row_count = len(df.index)
+
+#         df_columns_lower = {c.lower(): c for c in df.columns}
+#         missing = [col for col in REQUIRED_COLUMNS if col not in df_columns_lower]
+
+#         if missing:
+#             status = "failed"
+#             validation_errors["missing_columns"] = missing
+
+#     except HTTPException:
+#         status = "failed"
+#         raise
+#     except Exception as e:
+#         status = "failed"
+#         validation_errors["validation_error"] = f"Unexpected: {str(e)}"
+
+#     # ---- INSERT INTO DB ----
+#     sql = """
+#         INSERT INTO public.master_data_uploads (
+#             project_id, user_id,
+#             original_filename, mime_type, file_size,
+#             storage_strategy, file_blob,
+#             status, row_count, validation_errors
+#         )
+#         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+#         RETURNING
+#             id, project_id, user_id, original_filename, mime_type,
+#             file_size, status, row_count, validation_errors, created_at;
+#     """
+
+#     try:
+#         with get_db_connection() as conn:
+#             with conn.cursor() as cur:
+#                 cur.execute(sql, (
+#                     str(project_id),
+#                     user_id,
+#                     file.filename,
+#                     mime_type,
+#                     file_size,
+#                     "inline",
+#                     psycopg2.Binary(file_bytes),
+#                     status,
+#                     row_count,
+#                     Json(validation_errors) if validation_errors else None
+#                 ))
+
+#                 record = dict(zip([d[0] for d in cur.description], cur.fetchone()))
+#                 conn.commit()
+#                 return record
+
+#     except Exception as e:
+#         print("[MASTER_DATA] Upload DB error:", e)
+#         raise HTTPException(500, "Internal server error during upload.")
+
+
+# # ============================================================
+# # LAST UPLOAD ENDPOINT
+# # ============================================================
+
+# @router.get("/{project_id}/master-data/last-upload", response_model=MasterDataUploadStatus)
+# async def get_last_master_data_upload(
+#     project_id: UUID,
+#     user_id: str = Depends(get_current_user_id)
+# ):
+#     """
+#     Return metadata for the most recent upload.
+#     """
+#     sql = """
+#         SELECT
+#             id, project_id, user_id,
+#             original_filename, mime_type, file_size,
+#             status, row_count, validation_errors, created_at
+#         FROM public.master_data_uploads
+#         WHERE project_id = %s AND user_id = %s
+#         ORDER BY created_at DESC
+#         LIMIT 1;
+#     """
+
+#     try:
+#         with get_db_connection() as conn:
+#             with conn.cursor() as cur:
+#                 cur.execute(sql, (str(project_id), user_id))
+#                 row = cur.fetchone()
+
+#                 if not row:
+#                     raise HTTPException(404, "No master data uploads found.")
+
+#                 record = dict(zip([d[0] for d in cur.description], row))
+#                 return record
+
+#     except Exception as e:
+#         print("[MASTER_DATA] Last upload fetch error:", e)
+#         raise HTTPException(500, "Internal server error fetching last upload.")
+
+
+# # ============================================================
+# # PREVIEW ENDPOINT (LATEST FILE)
+# # ============================================================
+
+# @router.get("/{project_id}/master-data/preview", response_model=DataPreviewResponse)
+# async def get_master_data_preview(
+#     project_id: UUID,
+#     user_id: str = Depends(get_current_user_id)
+# ):
+#     """
+#     Reads the file_blobs of the most recent upload and returns 
+#     up to 50 preview rows.
+#     """
+#     sql = """
+#         SELECT file_blob, original_filename
+#         FROM public.master_data_uploads
+#         WHERE project_id = %s AND user_id = %s
+#         ORDER BY created_at DESC
+#         LIMIT 1;
+#     """
+
+#     try:
+#         with get_db_connection() as conn:
+#             with conn.cursor() as cur:
+#                 cur.execute(sql, (str(project_id), user_id))
+#                 row = cur.fetchone()
+
+#                 if not row:
+#                     raise HTTPException(404, "No file found for preview.")
+
+#                 file_blob_raw, filename = row
+
+#                 if isinstance(file_blob_raw, memoryview):
+#                     file_bytes = file_blob_raw.tobytes()
+#                 else:
+#                     file_bytes = file_blob_raw
+
+#     except Exception as e:
+#         print("[PREVIEW] DB error:", e)
+#         raise HTTPException(500, "Database error fetching file for preview.")
+
+#     # ---- PARSE ----
+#     try:
+#         df = _parse_master_data_file(file_bytes, filename)
+#         total_rows = len(df.index)
+
+#         preview_df = df.head(50).fillna("")
+#         preview_data = preview_df.to_dict("records")
+
+#         return DataPreviewResponse(
+#             preview_data=preview_data,
+#             total_rows=total_rows,
+#             columns=list(df.columns)
+#         )
+#     except Exception as e:
+#         print("[PREVIEW] Pandas error:", e)
+#         raise HTTPException(500, f"Error processing preview: {str(e)}")\n--- ./app/routers/projects.py ---\n
+from fastapi import APIRouter, HTTPException, Depends, Header
+import os
+import psycopg2
+from contextlib import contextmanager
+from jose import jwt
+from uuid import UUID
+from typing import List, Dict, Any
+
+from app.db.schemas import ProjectMetadata, ProjectDB
+
+router = APIRouter()
+
+JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+ALGORITHM = "HS256"
+
+
+@contextmanager
+def get_db_connection():
+    DB_URL = os.getenv("DATABASE_URL")
+    if not DB_URL:
+        raise ValueError("DATABASE_URL missing")
+
+    conn = None
+    try:
+        conn = psycopg2.connect(DB_URL)
+        yield conn
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_current_user_id(authorization: str = Header(None)) -> str:
+    if not authorization:
+        raise HTTPException(401, "Authorization header missing")
+    try:
+        scheme, token = authorization.split()
+        if scheme.lower() != "bearer":
+            raise HTTPException(401, "Invalid auth scheme (expected Bearer)")
+
+        payload = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=[ALGORITHM],
+            options={"verify_aud": False},
+        )
+        sub = payload.get("sub")
+        if not sub:
+            raise HTTPException(401, "Invalid token (sub missing)")
+        return sub
+
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(401, "Invalid token")
+
+
+def _row_to_dict(cur, row) -> Dict[str, Any]:
+    cols = [desc[0] for desc in cur.description]
+    return dict(zip(cols, row))
+
+
+# -------------------------------------------------------------------
+# CREATE PROJECT (Proposal container) + initialize proposal_data row
+# -------------------------------------------------------------------
+@router.post("/", status_code=201)
+async def create_project(
+    metadata: ProjectMetadata,
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Creates a project (proposal container) and immediately creates an empty proposal_data row (Option A).
+    """
+
+    sql_project = """
+        INSERT INTO public.projects (user_id, project_name, province, start_year)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id, created_at;
+    """
+
+    sql_proposal = """
+        INSERT INTO public.proposal_data (project_id, user_id, data_source)
+        VALUES (%s, %s, 'manual')
+        ON CONFLICT (project_id) DO NOTHING;
+    """
+
+    with get_db_connection() as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql_project,
+                    (user_id, metadata.project_name, metadata.province, metadata.start_year),
+                )
+                project_id, created_at = cur.fetchone()
+
+                cur.execute(sql_proposal, (str(project_id), user_id))
+
+            conn.commit()
+
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to create project: {str(e)}")
+
+    return {
+        "project_id": str(project_id),
+        "message": "Project created (proposal_data initialized)",
+        "created_at": created_at.isoformat(),
+    }
+
+
+# -------------------------------------------------------------------
+# GET ONE PROJECT
+# -------------------------------------------------------------------
+@router.get("/{project_id}", response_model=ProjectDB)
+def get_project(project_id: UUID, user_id: str = Depends(get_current_user_id)):
+    sql = """
+        SELECT
+          id,
+          user_id,
+          project_name,
+          province,
+          start_year,
+          proposal_title,
+          proposal_status,
+          created_at,
+          updated_at
+        FROM public.projects
+        WHERE id = %s AND user_id = %s;
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), user_id))
+            row = cur.fetchone()
+
+            if not row:
+                raise HTTPException(status_code=404, detail="Project not found")
+
+            return _row_to_dict(cur, row)
+
+
+# -------------------------------------------------------------------
+# LIST PROJECTS
+# -------------------------------------------------------------------
+@router.get("/", response_model=List[ProjectDB])
+async def list_projects(user_id: str = Depends(get_current_user_id)):
+    sql = """
+        SELECT
+          id,
+          user_id,
+          project_name,
+          province,
+          start_year,
+          proposal_title,
+          proposal_status,
+          created_at,
+          updated_at
+        FROM public.projects
+        WHERE user_id = %s
+        ORDER BY created_at DESC;
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (user_id,))
+            rows = cur.fetchall()
+            return [_row_to_dict(cur, r) for r in rows]
+        
+        \n--- ./app/__init__.py ---\n
+\n--- ./app/network_snapshot/service.py ---\n
+from uuid import UUID
+from typing import Dict, Any
+from app.routers.projects import get_db_connection
+
+def _n(x) -> float:
+    """Helper to convert None to 0.0"""
+    return float(x or 0)
+
+def get_network_snapshot(project_id: UUID, user_id: str) -> Dict[str, Any]:
+    # 1. Fetch Proposal Inputs
+    sql = """
+        SELECT 
+            paved_arid, paved_semi_arid, paved_dry_sub_humid, paved_moist_sub_humid, paved_humid,
+            gravel_arid, gravel_semi_arid, gravel_dry_sub_humid, gravel_moist_sub_humid, gravel_humid,
+            avg_vci_used, vehicle_km, fuel_sales
+        FROM public.proposal_data
+        WHERE project_id = %s AND user_id = %s
+    """
+    
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), user_id))
+            row = cur.fetchone()
+            
+            # If no data found, return zeros
+            if not row:
+                return {
+                    "totalLengthKm": 0, "pavedLengthKm": 0, "gravelLengthKm": 0,
+                    "avgVci": 0, "assetValue": 0, "totalVehicleKm": 0, "fuelSales": 0
+                }
+                
+            data = dict(zip([d[0] for d in cur.description], row))
+
+    # 2. Sum up lengths
+    paved_total = (
+        _n(data.get("paved_arid")) + _n(data.get("paved_semi_arid")) + 
+        _n(data.get("paved_dry_sub_humid")) + _n(data.get("paved_moist_sub_humid")) + _n(data.get("paved_humid"))
+    )
+    
+    gravel_total = (
+        _n(data.get("gravel_arid")) + _n(data.get("gravel_semi_arid")) + 
+        _n(data.get("gravel_dry_sub_humid")) + _n(data.get("gravel_moist_sub_humid")) + _n(data.get("gravel_humid"))
+    )
+    
+    total_km = paved_total + gravel_total
+
+    # 3. Calculate Asset Value (CRC)
+    # Using standard engineering estimates (adjust as needed)
+    RATE_PAVED = 3_500_000   # R3.5m per km
+    RATE_GRAVEL = 250_000    # R250k per km
+    
+    asset_value = (paved_total * RATE_PAVED) + (gravel_total * RATE_GRAVEL)
+
+    # 4. Return Flat Structure (matching React state)
+    return {
+        "totalLengthKm": round(total_km, 2),
+        "pavedLengthKm": round(paved_total, 2),
+        "gravelLengthKm": round(gravel_total, 2),
+        "avgVci": _n(data.get("avg_vci_used")),
+        "assetValue": round(asset_value, 2),
+        "totalVehicleKm": _n(data.get("vehicle_km")),
+        "fuelSales": _n(data.get("fuel_sales"))
+    }\n--- ./app/network_snapshot/__init__.py ---\n
+# app/network_snapshot/__init__.py
+from .router import router  # re-export for easy import in main.py
+
+__all__ = ["router"]\n--- ./app/network_snapshot/schemas.py ---\n
+from pydantic import BaseModel
+from typing import Optional
+
+class NetworkProfileOut(BaseModel):
+    # The essential stats for the card
+    totalLengthKm: float
+    pavedLengthKm: float
+    gravelLengthKm: float
+    
+    avgVci: float
+    assetValue: float      # The big money number (CRC)
+    
+    totalVehicleKm: float
+    fuelSales: float
+    
+    # Optional metadata if needed later
+    generated_at: Optional[str] = None\n--- ./app/network_snapshot/router.py ---\n
+from uuid import UUID
+from fastapi import APIRouter, Depends
+
+from app.routers.projects import get_current_user_id
+from .service import get_network_snapshot
+from .schemas import NetworkProfileOut
+
+router = APIRouter()
+
+@router.get(
+    "/{project_id}/network/snapshot",
+    response_model=NetworkProfileOut,
+    summary="Get calculated asset profile (CRC & VCI)",
+)
+def read_network_snapshot(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+):
+    return get_network_snapshot(project_id=project_id, user_id=user_id)\n--- ./app/computation/__init__.py ---\n
+# app/computation/__init__.py
+from .router import router  # so main.py can `from app.computation import router`
+
+__all__ = ["router"]\n--- ./app/computation/engine.py ---\n
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from uuid import UUID
+
+from app.scenarios.schemas import ForecastParametersOut
+from .schemas import SimulationOutput, YearlyResult, SimulationRunOptions
+
+
+def run_ronet_simulation(
+    project_id: UUID,
+    params: ForecastParametersOut,
+    network_profile: dict,
+    options: SimulationRunOptions,
+) -> SimulationOutput:
+    """
+    Enhanced RoNET-style simulation.
+    """
+
+    yearly_results = []
+
+    # 1) Determine Scope
+    paved_km = network_profile.get("pavedLengthKm", 0) if options.include_paved else 0
+    gravel_km = network_profile.get("gravelLengthKm", 0) if options.include_gravel else 0
+
+    # 2) Time Setup
+    duration = int(getattr(params, "analysis_duration", 5) or 5)
+    start_year = options.start_year_override or (datetime.now(timezone.utc).year + 1)
+
+    # 3) Economic Parameters
+    inflation = float(getattr(params, "cpi_percentage", 6.0) or 6.0) / 100.0
+    discount_rate = float(getattr(params, "discount_rate", 8.0) or 8.0) / 100.0
+
+    # 4) Unit Costs
+    UNIT_COST_PAVED = 160_000
+    UNIT_COST_GRAVEL = 45_000
+
+    base_annual_need = (float(paved_km) * UNIT_COST_PAVED) + (float(gravel_km) * UNIT_COST_GRAVEL)
+
+    # Initial States
+    current_vci = float(network_profile.get("avgVci", 50) or 50)
+    current_asset_value = float(network_profile.get("assetValue", 0) or 0)
+    
+    # Recalculate asset value if it's missing but we have km
+    if current_asset_value == 0 and (paved_km > 0 or gravel_km > 0):
+         current_asset_value = (paved_km * 3500000) + (gravel_km * 250000)
+
+    cumulative_npv = 0.0
+
+    for i in range(duration):
+        year = start_year + i
+        year_inflation_factor = (1 + inflation) ** i
+
+        # A) Determine Demand
+        condition_cost_factor = 1.0 + ((100 - current_vci) / 100.0)
+        nominal_need = base_annual_need * condition_cost_factor * year_inflation_factor
+
+        # B) Determine Actual Spend
+        is_do_nothing = (paved_km + gravel_km) == 0
+        actual_spend = 0.0 if is_do_nothing else nominal_need
+
+        # C) Deterioration Logic
+        if is_do_nothing:
+            decay_rate = 3.5 if current_vci > 50 else 5.0
+            current_vci = max(0.0, current_vci - decay_rate)
+            current_asset_value *= (1 - 0.04) 
+        else:
+            improvement = 2.5
+            current_vci = min(95.0, current_vci + improvement)
+            current_asset_value *= (1 + inflation)
+
+        # D) NPV
+        discount_factor = (1 + discount_rate) ** i
+        year_npv = actual_spend / discount_factor
+        cumulative_npv += year_npv
+
+        # E) Distributions
+        pct_good = max(0.0, min(100.0, (current_vci - 30) * 1.5))
+        pct_poor = max(0.0, min(100.0, (70 - current_vci) * 1.5))
+        pct_fair = max(0.0, 100.0 - pct_good - pct_poor)
+
+        yearly_results.append(
+            YearlyResult(
+                year=year,
+                avg_condition_index=round(current_vci, 2),
+                pct_good=round(pct_good, 1),
+                pct_fair=round(pct_fair, 1),
+                pct_poor=round(pct_poor, 1),
+                total_maintenance_cost=round(actual_spend, 2),
+                asset_value=round(current_asset_value, 2),
+            )
+        )
+
+    final_vci = yearly_results[-1].avg_condition_index if yearly_results else 0.0
+
+    return SimulationOutput(
+        project_id=str(project_id),
+        year_count=duration,
+        yearly_data=yearly_results,
+        total_cost_npv=float(cumulative_npv),
+        final_network_condition=float(final_vci),
+        generated_at=datetime.now(timezone.utc),
+    )\n--- ./app/computation/schemas.py ---\n
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import List, Optional, Dict, Any
+from uuid import UUID
+
+from pydantic import BaseModel, Field
+
+
+# ============================================================
+# INPUT: Simulation run options (from frontend)
+# ============================================================
+
+class SimulationRunOptions(BaseModel):
+    """
+    Options passed when triggering a run.
+    Frontend may send either snake_case or camelCase aliases.
+    """
+    start_year_override: Optional[int] = Field(None, alias="startYearOverride")
+    include_paved: bool = Field(True, alias="includePaved")
+    include_gravel: bool = Field(True, alias="includeGravel")
+
+    # New fields for history context
+    run_name: Optional[str] = Field(None, alias="runName")
+    notes: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+# ============================================================
+# OUTPUT: Core simulation payload (The Math Results)
+# ============================================================
+
+class YearlyResult(BaseModel):
+    year: int
+    avg_condition_index: float
+    pct_good: float
+    pct_fair: float
+    pct_poor: float
+    total_maintenance_cost: float
+    asset_value: float
+
+
+class SimulationOutput(BaseModel):
+    project_id: str
+    year_count: int
+    yearly_data: List[YearlyResult]
+    total_cost_npv: float
+    final_network_condition: float
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ============================================================
+# OUTPUT: DB row wrapper (History & Audit)
+# ============================================================
+
+class SimulationRunOut(BaseModel):
+    id: UUID
+    project_id: UUID
+    scenario_id: Optional[UUID] = None
+    run_at: datetime
+    triggered_by: Optional[UUID] = None
+    status: str = "completed"
+
+    # The calculated results
+    results_payload: SimulationOutput
+
+    # The Context (Snapshots)
+    run_name: Optional[str] = None
+    run_options: Dict[str, Any] = {}
+    assumptions_snapshot: Dict[str, Any] = {}
+    network_snapshot: Dict[str, Any] = {}
+    notes: Optional[str] = None
+
+    class Config:
+        from_attributes = True\n--- ./app/computation/router.py ---\n
+from __future__ import annotations
+
+from uuid import UUID
+from typing import List, Dict, Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from psycopg2.extras import Json
+
+from app.routers.projects import get_current_user_id, get_db_connection
+from app.scenarios import service as scenario_service
+from . import engine, schemas
+
+router = APIRouter()
+
+
+# -----------------------------------------------------------------------------
+# Helper: verify project belongs to user (security + demo safety)
+# -----------------------------------------------------------------------------
+def _assert_project_owned(project_id: UUID, user_id: str) -> None:
+    sql = "SELECT 1 FROM public.projects WHERE id = %s AND user_id = %s"
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), user_id))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Project not found.")
+
+
+# -----------------------------------------------------------------------------
+# 1. RUN SIMULATION (Saves History + Snapshots) + set ACTIVE
+# -----------------------------------------------------------------------------
+@router.post(
+    "/{project_id}/simulation/run",
+    response_model=schemas.SimulationRunOut,
+    summary="Run simulation, save snapshot, and set as ACTIVE.",
+)
+def run_simulation(
+    project_id: UUID,
+    options: schemas.SimulationRunOptions,
+    user_id: str = Depends(get_current_user_id),
+):
+    _assert_project_owned(project_id, user_id)
+
+    # 1) Load prerequisites
+    try:
+        scenario_params = scenario_service.get_forecast(project_id, user_id)
+        from app.network_snapshot.service import get_network_snapshot
+        network_profile = get_network_snapshot(project_id, user_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error loading prerequisites: {e}")
+
+    # 2) Run engine
+    try:
+        result = engine.run_ronet_simulation(
+            project_id=project_id,
+            params=scenario_params,
+            network_profile=network_profile,
+            options=options,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Simulation engine failed: {e}")
+
+    # 3) JSON-safe snapshots (IMPORTANT)
+    assumptions_dict = scenario_params.model_dump(mode="json")
+    run_options_dict = options.model_dump(mode="json", by_alias=True)
+    results_dict = result.model_dump(mode="json")
+
+    scenario_id = str(getattr(scenario_params, "id", None)) if getattr(scenario_params, "id", None) else None
+    final_run_name = options.run_name or f"Run {result.generated_at.strftime('%H:%M')}"
+
+    sql_insert = """
+        INSERT INTO public.simulation_results
+            (project_id, scenario_id, results_payload, triggered_by, status,
+             run_name, run_options, assumptions_snapshot, network_snapshot, notes)
+        VALUES
+            (%s, %s, %s, %s, 'completed',
+             %s, %s, %s, %s, %s)
+        RETURNING
+            id, project_id, scenario_id, results_payload, run_at, triggered_by, status,
+            run_name, run_options, assumptions_snapshot, network_snapshot, notes;
+    """
+
+    sql_update_project = """
+        UPDATE public.projects
+        SET active_simulation_run_id = %s, updated_at = NOW()
+        WHERE id = %s AND user_id = %s;
+    """
+
+    with get_db_connection() as conn:
+        try:
+            with conn.cursor() as cur:
+                # A) Insert the Simulation Result
+                cur.execute(
+                    sql_insert,
+                    (
+                        str(project_id),
+                        scenario_id,
+                        Json(results_dict),
+                        user_id,  # sub from Supabase is a UUID string, OK for PG uuid
+                        final_run_name,
+                        Json(run_options_dict),
+                        Json(assumptions_dict),
+                        Json(network_profile),
+                        options.notes,
+                    ),
+                )
+                new_run_row = cur.fetchone()
+                cols = [d[0] for d in cur.description]  # ✅ capture NOW (before UPDATE)
+                new_run_id = new_run_row[0]
+
+                # B) Set active run (ownership safe)
+                cur.execute(sql_update_project, (str(new_run_id), str(project_id), user_id))
+
+            conn.commit()
+            return dict(zip(cols, new_run_row))
+
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to save simulation result: {e}")
+
+
+# -----------------------------------------------------------------------------
+# 2. GET ACTIVE SIMULATION (proposal baseline)
+# -----------------------------------------------------------------------------
+@router.get(
+    "/{project_id}/simulation/latest",
+    response_model=schemas.SimulationRunOut,
+    summary="Get the ACTIVE simulation run (or most recent if none active)",
+)
+def get_latest_simulation(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+):
+    _assert_project_owned(project_id, user_id)
+
+    sql_check_active = """
+        SELECT active_simulation_run_id
+        FROM public.projects
+        WHERE id = %s AND user_id = %s
+    """
+
+    sql_fetch_run = """
+        SELECT
+            id, project_id, scenario_id, results_payload, run_at, triggered_by, status,
+            run_name, run_options, assumptions_snapshot, network_snapshot, notes
+        FROM public.simulation_results
+        WHERE id = %s AND project_id = %s
+    """
+
+    sql_fallback = """
+        SELECT
+            id, project_id, scenario_id, results_payload, run_at, triggered_by, status,
+            run_name, run_options, assumptions_snapshot, network_snapshot, notes
+        FROM public.simulation_results
+        WHERE project_id = %s
+        ORDER BY run_at DESC
+        LIMIT 1
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql_check_active, (str(project_id), user_id))
+            proj_row = cur.fetchone()
+            active_id = proj_row[0] if proj_row else None
+
+            target_row = None
+
+            if active_id:
+                cur.execute(sql_fetch_run, (str(active_id), str(project_id)))
+                target_row = cur.fetchone()
+
+            if not target_row:
+                cur.execute(sql_fallback, (str(project_id),))
+                target_row = cur.fetchone()
+
+            if not target_row:
+                raise HTTPException(status_code=404, detail="No simulation results found.")
+
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, target_row))
+
+
+# -----------------------------------------------------------------------------
+# 3. LIST HISTORY
+# -----------------------------------------------------------------------------
+@router.get(
+    "/{project_id}/simulation/history",
+    response_model=List[schemas.SimulationRunOut],
+    summary="List all past simulation runs",
+)
+def list_simulation_history(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+    limit: int = Query(20, ge=1, le=100),
+):
+    _assert_project_owned(project_id, user_id)
+
+    sql = """
+        SELECT
+            id, project_id, scenario_id, results_payload, run_at, triggered_by, status,
+            run_name, run_options, assumptions_snapshot, network_snapshot, notes
+        FROM public.simulation_results
+        WHERE project_id = %s
+        ORDER BY run_at DESC
+        LIMIT %s;
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), limit))
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in rows]
+
+
+# -----------------------------------------------------------------------------
+# 4. SET ACTIVE RUN
+# -----------------------------------------------------------------------------
+@router.post(
+    "/{project_id}/simulation/active/{run_id}",
+    status_code=200,
+    summary="Switch active proposal baseline to a specific past run.",
+)
+def set_active_simulation(
+    project_id: UUID,
+    run_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+):
+    _assert_project_owned(project_id, user_id)
+
+    sql_verify = "SELECT 1 FROM public.simulation_results WHERE id = %s AND project_id = %s"
+
+    sql_update = """
+        UPDATE public.projects
+        SET active_simulation_run_id = %s, updated_at = NOW()
+        WHERE id = %s AND user_id = %s
+    """
+
+    with get_db_connection() as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql_verify, (str(run_id), str(project_id)))
+                if not cur.fetchone():
+                    raise HTTPException(status_code=404, detail="Simulation run not found in this project.")
+
+                cur.execute(sql_update, (str(run_id), str(project_id), user_id))
+            conn.commit()
+            return {"message": "Active simulation updated", "active_run_id": str(run_id)}
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error switching active run: {e}")\n--- ./app/dashboards/service.py ---\n
+# app/dashboards/service.py
+from typing import List
+from uuid import UUID
+
+from fastapi import HTTPException
+
+from .schemas import DashboardCreate, DashboardOut, DashboardUpdate
+from . import repository
+
+
+def list_dashboards_service(
+    project_id: UUID,
+    user_id: str,
+) -> List[DashboardOut]:
+    rows = repository.list_dashboards_for_project(project_id, user_id)
+    return [DashboardOut(**r) for r in rows]
+
+
+def get_dashboard_service(
+    project_id: UUID,
+    dashboard_id: UUID,
+    user_id: str,
+) -> DashboardOut:
+    row = repository.fetch_dashboard(project_id, dashboard_id, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Dashboard not found.")
+    return DashboardOut(**row)
+
+
+def create_dashboard_service(
+    project_id: UUID,
+    user_id: str,
+    data: DashboardCreate,
+) -> DashboardOut:
+    payload = data.model_dump()
+    row = repository.insert_dashboard(project_id, user_id, payload)
+    return DashboardOut(**row)
+
+
+def update_dashboard_service(
+    project_id: UUID,
+    dashboard_id: UUID,
+    user_id: str,
+    data: DashboardUpdate,
+) -> DashboardOut:
+    payload = {k: v for k, v in data.model_dump().items() if v is not None}
+    row = repository.update_dashboard(project_id, dashboard_id, user_id, payload)
+    if not row:
+        raise HTTPException(status_code=404, detail="Dashboard not found.")
+    return DashboardOut(**row)\n--- ./app/dashboards/__init__.py ---\n
+# app/dashboards/__init__.py
+from .router import router  # so main.py can `from app.dashboards import router`
+
+__all__ = ["router"]\n--- ./app/dashboards/schemas.py ---\n
+# app/dashboards/schemas.py
+from typing import Any, Dict, Optional
+from uuid import UUID
+
+from pydantic import BaseModel, Field
+
+
+class DashboardBase(BaseModel):
+    name: str = Field(..., max_length=200)
+    description: Optional[str] = None
+    is_favorite: bool = False
+    layout: Optional[Dict[str, Any]] = None
+    overrides: Optional[Dict[str, Any]] = None
+
+
+class DashboardCreate(DashboardBase):
+    """Payload for creating a dashboard."""
+    pass
+
+
+class DashboardUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    is_favorite: Optional[bool] = None
+    layout: Optional[Dict[str, Any]] = None
+    overrides: Optional[Dict[str, Any]] = None
+
+
+class DashboardOut(DashboardBase):
+    id: UUID
+    project_id: UUID
+    user_id: str
+    created_at: str
+    updated_at: str
+
+    class Config:
+        from_attributes = True\n--- ./app/dashboards/router.py ---\n
+# app/dashboards/router.py
+from typing import List
+from uuid import UUID
+
+from fastapi import APIRouter, Depends
+
+from app.routers.projects import get_current_user_id
+from .schemas import DashboardCreate, DashboardOut, DashboardUpdate
+from . import service
+
+router = APIRouter()
+
+
+@router.get(
+    "/{project_id}/dashboards",
+    response_model=List[DashboardOut],
+    summary="List dashboards for a project",
+)
+def list_dashboards(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+):
+    return service.list_dashboards_service(project_id, user_id)
+
+
+@router.post(
+    "/{project_id}/dashboards",
+    response_model=DashboardOut,
+    summary="Create a new dashboard",
+)
+def create_dashboard(
+    project_id: UUID,
+    payload: DashboardCreate,
+    user_id: str = Depends(get_current_user_id),
+):
+    return service.create_dashboard_service(project_id, user_id, payload)
+
+
+@router.get(
+    "/{project_id}/dashboards/{dashboard_id}",
+    response_model=DashboardOut,
+    summary="Get a single dashboard",
+)
+def get_dashboard(
+    project_id: UUID,
+    dashboard_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+):
+    return service.get_dashboard_service(project_id, dashboard_id, user_id)
+
+
+@router.put(
+    "/{project_id}/dashboards/{dashboard_id}",
+    response_model=DashboardOut,
+    summary="Update an existing dashboard",
+)
+def update_dashboard(
+    project_id: UUID,
+    dashboard_id: UUID,
+    payload: DashboardUpdate,
+    user_id: str = Depends(get_current_user_id),
+):
+    return service.update_dashboard_service(project_id, dashboard_id, user_id, payload)\n--- ./app/dashboards/repository.py ---\n
+# app/dashboards/repository.py
+from typing import Any, Dict, List, Optional
+from uuid import UUID
+
+from psycopg2.extras import Json
+
+from app.routers.projects import get_db_connection
+
+
+def list_dashboards_for_project(
+    project_id: UUID,
+    user_id: str,
+) -> List[Dict[str, Any]]:
+    sql = """
+        SELECT
+            id, project_id, user_id,
+            name, description, is_favorite,
+            layout, overrides,
+            created_at, updated_at
+        FROM public.project_dashboards
+        WHERE project_id = %s AND user_id = %s
+        ORDER BY is_favorite DESC, created_at DESC;
+    """
+    with get_db_connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, (str(project_id), user_id))
+        rows = cur.fetchall()
+        if not rows:
+            return []
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in rows]
+
+
+def fetch_dashboard(
+    project_id: UUID,
+    dashboard_id: UUID,
+    user_id: str,
+) -> Optional[Dict[str, Any]]:
+    sql = """
+        SELECT
+            id, project_id, user_id,
+            name, description, is_favorite,
+            layout, overrides,
+            created_at, updated_at
+        FROM public.project_dashboards
+        WHERE id = %s AND project_id = %s AND user_id = %s
+        LIMIT 1;
+    """
+    with get_db_connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, (str(dashboard_id), str(project_id), user_id))
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+
+
+def insert_dashboard(
+    project_id: UUID,
+    user_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    sql = """
+        INSERT INTO public.project_dashboards (
+            project_id, user_id,
+            name, description, is_favorite,
+            layout, overrides
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s)
+        RETURNING
+            id, project_id, user_id,
+            name, description, is_favorite,
+            layout, overrides,
+            created_at, updated_at;
+    """
+    with get_db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            sql,
+            (
+                str(project_id),
+                user_id,
+                payload.get("name"),
+                payload.get("description"),
+                payload.get("is_favorite", False),
+                Json(payload.get("layout")) if payload.get("layout") is not None else None,
+                Json(payload.get("overrides")) if payload.get("overrides") is not None else None,
+            ),
+        )
+        row = cur.fetchone()
+        cols = [d[0] for d in cur.description]
+        conn.commit()
+        return dict(zip(cols, row))
+
+
+def update_dashboard(
+    project_id: UUID,
+    dashboard_id: UUID,
+    user_id: str,
+    payload: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    sql = """
+        UPDATE public.project_dashboards
+        SET
+            name = COALESCE(%s, name),
+            description = COALESCE(%s, description),
+            is_favorite = COALESCE(%s, is_favorite),
+            layout = COALESCE(%s, layout),
+            overrides = COALESCE(%s, overrides),
+            updated_at = now()
+        WHERE id = %s AND project_id = %s AND user_id = %s
+        RETURNING
+            id, project_id, user_id,
+            name, description, is_favorite,
+            layout, overrides,
+            created_at, updated_at;
+    """
+    with get_db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            sql,
+            (
+                payload.get("name"),
+                payload.get("description"),
+                payload.get("is_favorite"),
+                Json(payload.get("layout")) if "layout" in payload else None,
+                Json(payload.get("overrides")) if "overrides" in payload else None,
+                str(dashboard_id),
+                str(project_id),
+                user_id,
+            ),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cur.description]
+        conn.commit()
+        return dict(zip(cols, row))\n--- ./app/scenarios/service.py ---\n
+from uuid import UUID
+from fastapi import HTTPException
+from . import repository as repo
+from .schemas import ForecastParametersOut, ForecastParametersPatch
+
+def get_forecast(project_id: UUID, user_id: str) -> ForecastParametersOut:
+    # 1. Ensure DB row exists (Lazy Creation)
+    repo.ensure_assumptions_row(project_id, user_id)
+    
+    # 2. Fetch
+    data = repo.get_forecast_params(project_id, user_id)
+    if not data:
+        raise HTTPException(404, "Forecast parameters not found")
+        
+    return ForecastParametersOut(**data)
+
+def update_forecast(project_id: UUID, user_id: str, payload: ForecastParametersPatch) -> ForecastParametersOut:
+    # 1. Ensure DB row exists
+    repo.ensure_assumptions_row(project_id, user_id)
+    
+    # 2. Update
+    data = payload.model_dump(exclude_unset=True)
+    updated = repo.update_forecast_params(project_id, user_id, data)
+    
+    if not updated:
+        raise HTTPException(500, "Failed to update parameters")
+        
+    return ForecastParametersOut(**updated)\n--- ./app/scenarios/__init__.py ---\n
+# app/scenarios/__init__.py
+from .router import router
+
+__all__ = ["router"]\n--- ./app/scenarios/schemas.py ---\n
+from pydantic import BaseModel
+from typing import Optional
+from uuid import UUID
+from datetime import datetime
+
+class ForecastParametersOut(BaseModel):
+    id: UUID
+    project_id: UUID
+    
+    # Section A: Economic Reality
+    cpi_percentage: float = 6.0
+    discount_rate: float = 8.0
+    previous_allocation: float = 0
+    
+    # Section B: Engineering Reality
+    paved_deterioration_rate: str = "Medium" # Slow, Medium, Fast
+    gravel_loss_rate: float = 20.0          # mm/year
+    climate_stress_factor: str = "Medium"   # Low, Medium, High
+    
+    # Section C: Time Machine
+    analysis_duration: int = 5
+    
+    updated_at: datetime
+
+class ForecastParametersPatch(BaseModel):
+    cpi_percentage: Optional[float] = None
+    discount_rate: Optional[float] = None
+    previous_allocation: Optional[float] = None
+    
+    paved_deterioration_rate: Optional[str] = None
+    gravel_loss_rate: Optional[float] = None
+    climate_stress_factor: Optional[str] = None
+    
+    analysis_duration: Optional[int] = None\n--- ./app/scenarios/router.py ---\n
+from fastapi import APIRouter, Depends
+from uuid import UUID
+
+from app.routers.projects import get_current_user_id
+from .schemas import ForecastParametersOut, ForecastParametersPatch
+from . import service
+
+router = APIRouter()
+
+@router.get(
+    "/{project_id}/forecast",
+    response_model=ForecastParametersOut,
+    summary="Get forecast & strategy assumptions"
+)
+def get_forecast_parameters(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+):
+    return service.get_forecast(project_id, user_id)
+
+@router.patch(
+    "/{project_id}/forecast",
+    response_model=ForecastParametersOut,
+    summary="Update forecast & strategy assumptions"
+)
+def update_forecast_parameters(
+    project_id: UUID,
+    payload: ForecastParametersPatch,
+    user_id: str = Depends(get_current_user_id),
+):
+    return service.update_forecast(project_id, user_id, payload)\n--- ./app/scenarios/repository.py ---\n
+from uuid import UUID
+from typing import Dict, Any, Optional
+from app.routers.projects import get_db_connection
+
+def ensure_assumptions_row(project_id: UUID, user_id: str) -> None:
+    """
+    Ensures a row exists for this project in the assumptions table.
+    """
+    sql = """
+        INSERT INTO public.scenario_assumptions (project_id, user_id)
+        VALUES (%s, %s)
+        ON CONFLICT (project_id) DO NOTHING;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), user_id))
+        conn.commit()
+
+def get_forecast_params(project_id: UUID, user_id: str) -> Optional[Dict[str, Any]]:
+    sql = """
+        SELECT 
+            id, project_id, updated_at,
+            analysis_duration, discount_rate,
+            cpi_percentage, previous_allocation,
+            paved_deterioration_rate, gravel_loss_rate, climate_stress_factor
+        FROM public.scenario_assumptions
+        WHERE project_id = %s AND user_id = %s
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), user_id))
+            row = cur.fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))
+
+def update_forecast_params(project_id: UUID, user_id: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    # Dynamic SQL construction
+    set_clauses = []
+    values = []
+    for k, v in data.items():
+        set_clauses.append(f"{k} = %s")
+        values.append(v)
+    
+    if not set_clauses:
+        return get_forecast_params(project_id, user_id)
+
+    sql = f"""
+        UPDATE public.scenario_assumptions
+        SET {", ".join(set_clauses)}, updated_at = NOW()
+        WHERE project_id = %s AND user_id = %s
+        RETURNING 
+            id, project_id, updated_at,
+            analysis_duration, discount_rate,
+            cpi_percentage, previous_allocation,
+            paved_deterioration_rate, gravel_loss_rate, climate_stress_factor
+    """
+    
+    values.extend([str(project_id), user_id])
+    
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(values))
+            row = cur.fetchone()
+            conn.commit()
+            if not row:
+                return None
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))\n--- ./app/db/models.py ---\n
+# app/db/models.py
+
+from pydantic import BaseModel
+from typing import Optional
+from datetime import datetime
+from uuid import UUID
+import os
+
+
+
+JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+ALGORITHM = "HS256"
+
+print("JWT_SECRET loaded? ->", bool(JWT_SECRET))  
+
+
+# Schema used for retrieving a saved project from the database
+class ProjectDB(BaseModel):
+    id: UUID
+    user_id: UUID
+    project_name: str
+    description: Optional[str] = None
+    start_year: int
+    forecast_duration: int
+    discount_rate: float # Numeric in PG, float in Python
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        orm_mode = True # Allows Pydantic to read ORM objects\n--- ./app/db/__init__.py ---\n
+\n--- ./app/db/schemas.py ---\n
+from pydantic import BaseModel
+from typing import Optional
+from datetime import datetime
+from uuid import UUID
+
+
+# ============================================================
+# PROJECT Schemas (proposal-first flow)
+# ============================================================
+
+class ProjectMetadata(BaseModel):
+    project_name: str
+    province: str
+    start_year: int
+
+
+class ProjectDB(BaseModel):
+    id: UUID
+    user_id: UUID
+    project_name: str
+    province: str
+    start_year: int
+
+    proposal_title: Optional[str] = None
+    proposal_status: Optional[str] = None
+
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True\n--- ./app/ai_advisor/service.py ---\n
+from __future__ import annotations
+
+import os
+import json
+from dotenv import load_dotenv
+from openai import OpenAI
+
+load_dotenv()
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+def generate_strategic_narrative(context_data: dict) -> dict:
+    """
+    Generates a high-impact Provincial Treasury persuasion insight.
+    Returns JSON (dict).
+    """
+
+    system_prompt = """
+You are a Chief Infrastructure Economist advising a PROVINCIAL TREASURY.
+
+You are reviewing a provincial road funding request.
+Your role is to translate engineering deterioration into fiscal risk and budget justification.
+
+TONE:
+- Professional, urgent, financially rigorous.
+- Avoid fluffy language.
+- Prefer terms like: "Deferred Maintenance Liability", "Asset Impairment", "Balance Sheet Risk", "Allocative Inefficiency".
+- If the scenario shows deterioration/value destruction: frame as fiscal irresponsibility and growing contingent liability.
+- If the scenario shows improvement/value preservation: frame as yield on investment and risk mitigation.
+
+OUTPUT FORMAT (JSON ONLY):
+{
+  "headline": "A punchy 5–8 word headline",
+  "executive_summary": "2 sentences: lead with the bottom-line fiscal impact.",
+  "fiscal_implications": {
+    "liability_growth": "How backlog/liability grows in Rand terms if ignored.",
+    "economic_risk": "Impact on provincial logistics, jobs, GDP, service delivery."
+  },
+  "engineering_reality": "Translate VCI change into plain language road outcomes.",
+  "recommendation": "Decisive recommendation to the Provincial Budget Committee."
+}
+""".strip()
+
+    start_val = float(context_data.get("raw_start_asset_value", 0) or 0)
+    end_val = float(context_data.get("raw_end_asset_value", 0) or 0)
+    value_destroyed = start_val - end_val  # positive = destruction
+
+    user_prompt = f"""
+REVIEW THIS FUNDING SCENARIO:
+
+PROJECT: {context_data.get('project_name')}
+DURATION: {context_data.get('duration')} years
+
+FINANCIALS:
+- Proposed Spend (NPV): {context_data.get('total_cost')}
+- Asset Value at Start: {context_data.get('current_asset_value')}
+- Asset Value at End: {context_data.get('future_asset_value')}
+- NET VALUE DESTRUCTION (Rand): {value_destroyed:,.0f}
+  (Positive means value destroyed; negative means value gained/preserved.)
+
+CONDITION (VCI 0-100):
+- Start VCI: {context_data.get('start_vci')}
+- End VCI: {context_data.get('end_vci')}
+- Change: {context_data.get('vci_change')}
+
+INSTRUCTIONS:
+- If NET VALUE DESTRUCTION is high, describe it as an asset impairment and deferred maintenance liability.
+- If End VCI drops below 40, explicitly warn of "network collapse risk" and service delivery disruption.
+- Keep it short, hard-hitting, and treasury-friendly.
+""".strip()
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.7,
+        )
+        content = response.choices[0].message.content
+        return json.loads(content)
+
+    except Exception as e:
+        print(f"OpenAI Error: {e}")
+        return {
+            "headline": "AI Insight Unavailable",
+            "executive_summary": "AI generation failed. Please check backend logs and API key configuration.",
+            "fiscal_implications": {"liability_growth": "N/A", "economic_risk": "N/A"},
+            "engineering_reality": "N/A",
+            "recommendation": "Retry generation after resolving the backend error.",
+        }\n--- ./app/ai_advisor/schemas.py ---\n
+from __future__ import annotations
+
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
+from uuid import UUID
+from datetime import datetime
+
+
+class AiInsightBase(BaseModel):
+    insight_type: str = "treasury_narrative"
+    status: str = "draft"
+    content: Dict[str, Any]
+
+
+class AiInsightOut(AiInsightBase):
+    id: UUID
+    project_id: UUID
+    simulation_run_id: Optional[UUID] = None
+    created_at: datetime
+    created_by: Optional[UUID] = None
+
+    # Small snippet so frontend can label “based on Run X…”
+    simulation_summary: Optional[Dict[str, Any]] = None
+
+    class Config:
+        from_attributes = True\n--- ./app/ai_advisor/router.py ---\n
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from uuid import UUID
+from typing import List
+from psycopg2.extras import Json
+
+from app.routers.projects import get_current_user_id, get_db_connection
+from .service import generate_strategic_narrative
+from .schemas import AiInsightOut
+
+router = APIRouter()
+
+# -----------------------------------------------------------------------------
+# HELPERS
+# -----------------------------------------------------------------------------
+def _assert_project_owned(cur, project_id: UUID, user_id: str) -> str:
+    """
+    Ensures the project exists AND belongs to the authenticated user.
+    Returns project_name.
+    """
+    cur.execute(
+        """
+        SELECT project_name
+        FROM public.projects
+        WHERE id = %s AND user_id = %s
+        """,
+        (str(project_id), user_id),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found or not owned by user.")
+    return row[0]
+
+
+# -----------------------------------------------------------------------------
+# 1. GENERATE & SAVE (The "Create" Action)
+# -----------------------------------------------------------------------------
+@router.post(
+    "/{project_id}/advisor/generate",
+    response_model=AiInsightOut,
+    summary="Generate insight for the ACTIVE simulation and save it to history.",
+)
+def generate_and_save_ai_feedback(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    1) Verify project ownership
+    2) Read active_simulation_run_id
+    3) Pull that simulation's results_payload
+    4) Generate insight via OpenAI
+    5) Save to ai_insights
+    6) Return the saved row + simulation_summary snippet
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # A) Ownership + fetch project_name
+            project_name = _assert_project_owned(cur, project_id, user_id)
+
+            # B) Get Active Simulation ID
+            cur.execute(
+                "SELECT active_simulation_run_id FROM public.projects WHERE id = %s",
+                (str(project_id),),
+            )
+            proj_row = cur.fetchone()
+            active_run_id = proj_row[0] if proj_row else None
+
+            if not active_run_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No active simulation run selected. Please run a simulation first.",
+                )
+
+            # C) Fetch that run
+            cur.execute(
+                """
+                SELECT results_payload, run_name, run_options
+                FROM public.simulation_results
+                WHERE id = %s AND project_id = %s
+                """,
+                (str(active_run_id), str(project_id)),
+            )
+            sim_row = cur.fetchone()
+            if not sim_row:
+                raise HTTPException(status_code=404, detail="Active simulation run data is missing.")
+
+            sim_data, run_name, run_opts = sim_row
+            yearly = (sim_data or {}).get("yearly_data", [])
+            if not yearly:
+                raise HTTPException(status_code=400, detail="Simulation payload is missing yearly_data.")
+
+            # D) Format for AI service
+            def fmt_money(x):
+                if x is None:
+                    return "R 0"
+                try:
+                    x = float(x)
+                except Exception:
+                    return "R 0"
+                return f"R {x/1_000_000_000:.2f} Billion" if x >= 1_000_000_000 else f"R {x/1_000_000:.1f} Million"
+
+            start_val = float(yearly[0].get("asset_value", 0) or 0)
+            end_val = float(yearly[-1].get("asset_value", 0) or 0)
+            start_vci = float(yearly[0].get("avg_condition_index", 0) or 0)
+            end_vci = float(yearly[-1].get("avg_condition_index", 0) or 0)
+
+            context_payload = {
+                "project_name": project_name,
+                "duration": (sim_data or {}).get("year_count"),
+                "total_cost": fmt_money((sim_data or {}).get("total_cost_npv", 0)),
+                "current_asset_value": fmt_money(start_val),
+                "future_asset_value": fmt_money(end_val),
+                "raw_start_asset_value": start_val,
+                "raw_end_asset_value": end_val,
+                "start_vci": start_vci,
+                "end_vci": end_vci,
+                "vci_change": round(end_vci - start_vci, 2),
+            }
+
+            # E) Generate
+            ai_content = generate_strategic_narrative(context_payload)
+
+            # F) Save to DB
+            sql_insert = """
+                INSERT INTO public.ai_insights
+                    (project_id, simulation_run_id, content, status, created_by, insight_type, model, prompt_version)
+                VALUES
+                    (%s, %s, %s, 'final', %s, 'treasury_narrative', %s, %s)
+                RETURNING
+                    id, project_id, simulation_run_id, content, status, created_at, created_by, insight_type;
+            """
+
+            cur.execute(
+                sql_insert,
+                (
+                    str(project_id),
+                    str(active_run_id),
+                    Json(ai_content),
+                    user_id,
+                    "gpt-4o",
+                    "v1",
+                ),
+            )
+            row = cur.fetchone()
+            cols = [d[0] for d in cur.description]
+            conn.commit()
+
+            record = dict(zip(cols, row))
+
+            # Add simulation_summary for the frontend
+            record["simulation_summary"] = {
+                "run_name": run_name,
+                "total_cost": context_payload["total_cost"],
+                "end_vci": round(end_vci, 1),
+            }
+
+            return record
+
+
+# -----------------------------------------------------------------------------
+# 2. LIST HISTORY (The "Sublink" View)
+# -----------------------------------------------------------------------------
+@router.get(
+    "/{project_id}/advisor/history",
+    response_model=List[AiInsightOut],
+    summary="List past AI insights for this project.",
+)
+def list_ai_history(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+    limit: int = Query(10, ge=1, le=50),
+):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Ownership check
+            _assert_project_owned(cur, project_id, user_id)
+
+            sql = """
+                SELECT
+                    ai.id, ai.project_id, ai.simulation_run_id,
+                    ai.content, ai.status, ai.created_at, ai.created_by, ai.insight_type,
+                    sr.run_name, sr.results_payload
+                FROM public.ai_insights ai
+                LEFT JOIN public.simulation_results sr
+                    ON ai.simulation_run_id = sr.id
+                WHERE ai.project_id = %s
+                ORDER BY ai.created_at DESC
+                LIMIT %s
+            """
+            cur.execute(sql, (str(project_id), limit))
+            rows = cur.fetchall()
+
+            results = []
+            for row in rows:
+                (
+                    r_id, r_proj, r_sim_id,
+                    r_content, r_status, r_created, r_by, r_type,
+                    run_name, run_payload
+                ) = row
+
+                sim_summary = None
+                if run_payload:
+                    yearly = (run_payload or {}).get("yearly_data", [])
+                    final_vci = float(yearly[-1].get("avg_condition_index", 0) or 0) if yearly else 0
+                    cost = float((run_payload or {}).get("total_cost_npv", 0) or 0)
+
+                    sim_summary = {
+                        "run_name": run_name,
+                        "total_cost": f"R {cost/1_000_000:.0f} M",
+                        "end_vci": round(final_vci, 1),
+                    }
+
+                results.append(
+                    {
+                        "id": r_id,
+                        "project_id": r_proj,
+                        "simulation_run_id": r_sim_id,
+                        "content": r_content,
+                        "status": r_status,
+                        "created_at": r_created,
+                        "created_by": r_by,
+                        "insight_type": r_type,
+                        "simulation_summary": sim_summary,
+                    }
+                )
+
+            return results\n--- ./app/main.py ---\n
+# app/main.py
+
+from pathlib import Path
+
+from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+# -------------------------------------------------------------------
+# 1. Load .env
+# -------------------------------------------------------------------
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
+# -------------------------------------------------------------------
+# 2. Router Imports
+# -------------------------------------------------------------------
+# Core Project & User context
+from app.routers.projects import router as projects_router
+from app.proposal_data.router import router as proposal_data_router
+
+# Provincial data inputs (province-by-province)
+from app.routers.provincial_stats import router as provincial_stats_router
+# from app.routers.master_data import router as master_data_router
+
+# The 3 Pillars of the App
+from app.network_snapshot.router import router as network_snapshot_router
+from app.scenarios.router import router as scenarios_router
+from app.computation.router import router as computation_router
+
+# Treasury Extensions
+from app.ai_advisor.router import router as ai_router
+from app.reports.router import router as reports_router
+
+# -------------------------------------------------------------------
+# 3. App Config
+# -------------------------------------------------------------------
+app = FastAPI(
+    title="Mosianedi Investment API",
+    description="API Gateway for Provincial Road Budget Proposals & Forecasting.",
+    version="1.0.0",
+)
+
+# -------------------------------------------------------------------
+# 4. CORS Middleware
+# -------------------------------------------------------------------
+origins = [
+    "http://localhost:3000",                       # Local Development
+    "http://localhost:3001",                       # Optional alt dev port
+    "https://mosianedi-frontend.vercel.app",       # Production Frontend
+    # "https://mosianedi-frontend-git-main.vercel.app",  # Preview deployments
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# -------------------------------------------------------------------
+# 5. Register Routes
+# -------------------------------------------------------------------
+# Everything stays under /api/v1/projects to keep project context consistent.
+
+# Projects + Proposal Inputs
+app.include_router(projects_router, prefix="/api/v1/projects", tags=["Projects"])
+app.include_router(proposal_data_router, prefix="/api/v1/projects", tags=["Proposal Inputs"])
+
+# Province-specific uploads/inputs
+app.include_router(provincial_stats_router, prefix="/api/v1/projects", tags=["Provincial Stats"])
+# app.include_router(master_data_router, prefix="/api/v1/projects", tags=["Master Data"])
+
+# Core Pillars
+app.include_router(network_snapshot_router, prefix="/api/v1/projects", tags=["Network Snapshot"])
+app.include_router(scenarios_router, prefix="/api/v1/projects", tags=["Forecast & Strategy"])
+app.include_router(computation_router, prefix="/api/v1/projects", tags=["Computation Engine"])
+
+# AI & Reports
+app.include_router(ai_router, prefix="/api/v1/projects", tags=["AI Advisor"])
+app.include_router(reports_router, prefix="/api/v1/projects", tags=["Reports"])
+
+# -------------------------------------------------------------------
+# 6. Health Check
+# -------------------------------------------------------------------
+@app.get("/api/health")
+def health_check():
+    return {"status": "online", "version": "1.0.0"}
+
+
+@app.get("/")
+def read_root():
+    return {
+        "status": "online",
+        "service": "Mosianedi Investment API",
+        "version": "1.0.0",
+    }\n--- ./app/proposal_data/service.py ---\n
+from .schemas import ProposalDataPayload
+
+def compute_paved_total(p: ProposalDataPayload) -> float:
+    return p.paved_arid + p.paved_semi_arid + p.paved_dry_sub_humid + p.paved_moist_sub_humid + p.paved_humid
+
+def compute_gravel_total(p: ProposalDataPayload) -> float:
+    return p.gravel_arid + p.gravel_semi_arid + p.gravel_dry_sub_humid + p.gravel_moist_sub_humid + p.gravel_humid
+\n--- ./app/proposal_data/__init__.py ---\n
+from .router import router\n--- ./app/proposal_data/schemas.py ---\n
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
+from datetime import datetime
+from uuid import UUID
+
+
+class ProposalDataOut(BaseModel):
+    id: UUID
+    project_id: UUID
+    user_id: UUID
+    data_source: str
+
+    paved_arid: float = 0
+    paved_semi_arid: float = 0
+    paved_dry_sub_humid: float = 0
+    paved_moist_sub_humid: float = 0
+    paved_humid: float = 0
+
+    gravel_arid: float = 0
+    gravel_semi_arid: float = 0
+    gravel_dry_sub_humid: float = 0
+    gravel_moist_sub_humid: float = 0
+    gravel_humid: float = 0
+
+    avg_vci_used: float = 0
+    vehicle_km: float = 0
+    pct_vehicle_km_used: float = 0
+    fuel_sales: float = 0
+    pct_fuel_sales_used: float = 0
+    fuel_option_selected: int = 1
+    target_vci: float = 45
+
+    extra_inputs: Dict[str, Any] = {}
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProposalDataPatch(BaseModel):
+    # allow partial updates
+    paved_arid: Optional[float] = None
+    paved_semi_arid: Optional[float] = None
+    paved_dry_sub_humid: Optional[float] = None
+    paved_moist_sub_humid: Optional[float] = None
+    paved_humid: Optional[float] = None
+
+    gravel_arid: Optional[float] = None
+    gravel_semi_arid: Optional[float] = None
+    gravel_dry_sub_humid: Optional[float] = None
+    gravel_moist_sub_humid: Optional[float] = None
+    gravel_humid: Optional[float] = None
+
+    avg_vci_used: Optional[float] = None
+    vehicle_km: Optional[float] = None
+    pct_vehicle_km_used: Optional[float] = None
+    fuel_sales: Optional[float] = None
+    pct_fuel_sales_used: Optional[float] = None
+    fuel_option_selected: Optional[int] = None
+    target_vci: Optional[float] = None
+
+    extra_inputs: Optional[Dict[str, Any]] = None
+    
+    \n--- ./app/proposal_data/router.py ---\n
+from uuid import UUID
+from fastapi import APIRouter, Depends, HTTPException
+from typing import Dict, Any
+
+from app.routers.projects import get_current_user_id, get_db_connection
+from .schemas import ProposalDataOut, ProposalDataPatch
+
+router = APIRouter()
+
+def _row_to_dict(cur, row) -> Dict[str, Any]:
+    cols = [desc[0] for desc in cur.description]
+    return dict(zip(cols, row))
+
+def _ensure_row(project_id: UUID, user_id: str) -> None:
+    sql = """
+        INSERT INTO public.proposal_data (project_id, user_id, data_source)
+        VALUES (%s, %s, 'manual')
+        ON CONFLICT (project_id) DO NOTHING;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), user_id))
+        conn.commit()
+
+@router.get(
+    "/{project_id}/proposal-data",
+    response_model=ProposalDataOut,
+    summary="Get proposal inputs for a project",
+)
+def get_proposal_data(project_id: UUID, user_id: str = Depends(get_current_user_id)):
+    # ensure row exists (covers old projects)
+    _ensure_row(project_id, user_id)
+
+    sql = """
+        SELECT *
+        FROM public.proposal_data
+        WHERE project_id = %s AND user_id = %s
+        LIMIT 1;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(project_id), user_id))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "proposal_data row not found after ensure (unexpected).")
+            return _row_to_dict(cur, row)
+
+@router.patch(
+    "/{project_id}/proposal-data",
+    response_model=ProposalDataOut,
+    summary="Update proposal inputs for a project",
+)
+def patch_proposal_data(
+    project_id: UUID,
+    payload: ProposalDataPatch,
+    user_id: str = Depends(get_current_user_id),
+):
+    # ensure row exists (covers old projects)
+    _ensure_row(project_id, user_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(400, "No fields provided")
+
+    set_parts = []
+    values = []
+    for k, v in data.items():
+        set_parts.append(f"{k} = %s")
+        values.append(v)
+
+    set_clause = ", ".join(set_parts)
+
+    sql = f"""
+        UPDATE public.proposal_data
+        SET {set_clause}, updated_at = now()
+        WHERE project_id = %s AND user_id = %s
+        RETURNING *;
+    """
+
+    with get_db_connection() as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, (*values, str(project_id), user_id))
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(404, "proposal_data row not found for this project/user")
+                conn.commit()
+                return _row_to_dict(cur, row)
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(500, f"Failed to update proposal_data: {str(e)}")
+        \n--- ./app/proposal_data/repository.py ---\n
+from typing import Optional, Dict, Any
+from datetime import datetime
+
+def assert_project_owned(conn, project_id: str, user_id: str) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM public.projects WHERE id = %s AND user_id = %s",
+        (project_id, user_id),
+    )
+    ok = cur.fetchone()
+    cur.close()
+    if not ok:
+        raise ValueError("Project not found or not owned by user")
+
+def get_proposal_data(conn, project_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    # ownership check
+    assert_project_owned(conn, project_id, user_id)
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+          paved_arid, paved_semi_arid, paved_dry_sub_humid, paved_moist_sub_humid, paved_humid,
+          gravel_arid, gravel_semi_arid, gravel_dry_sub_humid, gravel_moist_sub_humid, gravel_humid,
+          avg_vci_used, vehicle_km, pct_vehicle_km_used,
+          fuel_sales, pct_fuel_sales_used, fuel_option_selected, target_vci,
+          extra_inputs, updated_at
+        FROM public.proposal_data
+        WHERE project_id = %s AND user_id = %s
+        """,
+        (project_id, user_id),
+    )
+    row = cur.fetchone()
+    cols = [d[0] for d in cur.description]
+    cur.close()
+
+    if not row:
+        return None
+
+    data = dict(zip(cols, row))
+    updated_at = data.get("updated_at")
+    if isinstance(updated_at, datetime):
+        data["updated_at"] = updated_at.isoformat()
+
+    return data
+
+def upsert_proposal_data(conn, project_id: str, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    assert_project_owned(conn, project_id, user_id)
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO public.proposal_data (
+          project_id, user_id, data_source,
+          paved_arid, paved_semi_arid, paved_dry_sub_humid, paved_moist_sub_humid, paved_humid,
+          gravel_arid, gravel_semi_arid, gravel_dry_sub_humid, gravel_moist_sub_humid, gravel_humid,
+          avg_vci_used, vehicle_km, pct_vehicle_km_used,
+          fuel_sales, pct_fuel_sales_used, fuel_option_selected, target_vci,
+          extra_inputs, updated_at
+        )
+        VALUES (
+          %s, %s, 'manual',
+          %s, %s, %s, %s, %s,
+          %s, %s, %s, %s, %s,
+          %s, %s, %s,
+          %s, %s, %s, %s,
+          %s, now()
+        )
+        ON CONFLICT (project_id)
+        DO UPDATE SET
+          user_id = EXCLUDED.user_id,
+          data_source = EXCLUDED.data_source,
+
+          paved_arid = EXCLUDED.paved_arid,
+          paved_semi_arid = EXCLUDED.paved_semi_arid,
+          paved_dry_sub_humid = EXCLUDED.paved_dry_sub_humid,
+          paved_moist_sub_humid = EXCLUDED.paved_moist_sub_humid,
+          paved_humid = EXCLUDED.paved_humid,
+
+          gravel_arid = EXCLUDED.gravel_arid,
+          gravel_semi_arid = EXCLUDED.gravel_semi_arid,
+          gravel_dry_sub_humid = EXCLUDED.gravel_dry_sub_humid,
+          gravel_moist_sub_humid = EXCLUDED.gravel_moist_sub_humid,
+          gravel_humid = EXCLUDED.gravel_humid,
+
+          avg_vci_used = EXCLUDED.avg_vci_used,
+          vehicle_km = EXCLUDED.vehicle_km,
+          pct_vehicle_km_used = EXCLUDED.pct_vehicle_km_used,
+
+          fuel_sales = EXCLUDED.fuel_sales,
+          pct_fuel_sales_used = EXCLUDED.pct_fuel_sales_used,
+          fuel_option_selected = EXCLUDED.fuel_option_selected,
+          target_vci = EXCLUDED.target_vci,
+
+          extra_inputs = EXCLUDED.extra_inputs,
+          updated_at = now()
+        RETURNING
+          paved_arid, paved_semi_arid, paved_dry_sub_humid, paved_moist_sub_humid, paved_humid,
+          gravel_arid, gravel_semi_arid, gravel_dry_sub_humid, gravel_moist_sub_humid, gravel_humid,
+          avg_vci_used, vehicle_km, pct_vehicle_km_used,
+          fuel_sales, pct_fuel_sales_used, fuel_option_selected, target_vci,
+          extra_inputs, updated_at
+        """,
+        (
+            project_id, user_id,
+            payload["paved_arid"], payload["paved_semi_arid"], payload["paved_dry_sub_humid"], payload["paved_moist_sub_humid"], payload["paved_humid"],
+            payload["gravel_arid"], payload["gravel_semi_arid"], payload["gravel_dry_sub_humid"], payload["gravel_moist_sub_humid"], payload["gravel_humid"],
+            payload["avg_vci_used"], payload["vehicle_km"], payload["pct_vehicle_km_used"],
+            payload["fuel_sales"], payload["pct_fuel_sales_used"], payload["fuel_option_selected"], payload["target_vci"],
+            payload["extra_inputs"],
+        ),
+    )
+
+    row = cur.fetchone()
+    cols = [d[0] for d in cur.description]
+    conn.commit()
+    cur.close()
+
+    data = dict(zip(cols, row))
+    updated_at = data.get("updated_at")
+    if isinstance(updated_at, datetime):
+        data["updated_at"] = updated_at.isoformat()
+
+    return data
+\n--- ./app/proposal_data/validation.py ---\n
+from typing import Dict, Any, List, Tuple
+from .schemas import ProposalDataPayload
+from .service import compute_paved_total, compute_gravel_total
+
+class ProposalValidationError(Exception):
+    def __init__(self, errors: List[Dict[str, Any]]):
+        super().__init__("Proposal data validation failed")
+        self.errors = errors
+
+def validate_proposal_data(payload: ProposalDataPayload) -> Tuple[bool, List[Dict[str, Any]]]:
+    errors: List[Dict[str, Any]] = []
+    total = compute_paved_total(payload) + compute_gravel_total(payload)
+
+    if total <= 0:
+        errors.append({"field": "total_lane_km", "message": "Total network length must be > 0.", "code": "TOTAL_LANE_KM_ZERO"})
+
+    if payload.avg_vci_used <= 0:
+        errors.append({"field": "avg_vci_used", "message": "Average VCI must be > 0.", "code": "AVG_VCI_REQUIRED"})
+
+    if payload.vehicle_km <= 0:
+        errors.append({"field": "vehicle_km", "message": "Vehicle-km must be > 0.", "code": "VEHICLE_KM_REQUIRED"})
+
+    if payload.fuel_sales <= 0:
+        errors.append({"field": "fuel_sales", "message": "Fuel sales must be > 0.", "code": "FUEL_SALES_REQUIRED"})
+
+    if payload.fuel_option_selected not in (1, 2):
+        errors.append({"field": "fuel_option_selected", "message": "Fuel option must be 1 or 2.", "code": "INVALID_FUEL_OPTION"})
+
+    return (len(errors) == 0), errors
+
+def validate_or_raise(payload: ProposalDataPayload) -> None:
+    ok, errors = validate_proposal_data(payload)
+    if not ok:
+        raise ProposalValidationError(errors)
+\n--- ./app/reports/__init__.py ---\n
+from .router import router
+__all__ = ["router"]\n--- ./app/reports/schemas.py ---\n
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
+from uuid import UUID
+from datetime import datetime
+
+
+class ReportCreate(BaseModel):
+    title: str
+    report_type: str = Field(default="treasury_pack")  # executive, engineering, gis, treasury_pack
+    simulation_run_id: UUID
+    ai_insight_id: Optional[UUID] = None
+
+    # toggles for what to include in the compiled report
+    config: Dict[str, bool] = Field(
+        default_factory=lambda: {
+            "show_cost_of_doing_nothing": True,
+            "show_asset_value": True,
+            "include_engineering_details": False,
+        }
+    )
+
+
+class ReportOut(BaseModel):
+    id: UUID
+    project_id: UUID
+    title: str
+    report_type: str
+    status: str = "draft"
+    public_share_slug: Optional[str] = None
+    created_at: datetime
+
+    # compiled view payload (optional depending on endpoint)
+    simulation_data: Optional[Dict[str, Any]] = None
+    ai_narrative: Optional[Dict[str, Any]] = None
+    project_meta: Optional[Dict[str, Any]] = None
+
+    class Config:
+        from_attributes = True\n--- ./app/reports/router.py ---\n
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+from uuid import UUID
+from typing import List
+
+from app.routers.projects import get_current_user_id
+from .schemas import ReportCreate, ReportOut
+from . import repository
+
+router = APIRouter()
+
+
+# -----------------------------------------------------------------------------
+# 1) CREATE REPORT
+# -----------------------------------------------------------------------------
+@router.post(
+    "/{project_id}/reports",
+    response_model=ReportOut,
+    summary="Create a new Report Bundle (links simulation + optional AI)",
+)
+def create_new_report(
+    project_id: UUID,
+    payload: ReportCreate,
+    user_id: str = Depends(get_current_user_id),
+):
+    try:
+        return repository.create_report(project_id, user_id, payload.model_dump())
+    except ValueError as e:
+        # ownership / not found
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create report: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
+# 2) LIST REPORTS (history)
+# -----------------------------------------------------------------------------
+@router.get(
+    "/{project_id}/reports",
+    response_model=List[ReportOut],
+    summary="List all reports for this project",
+)
+def list_project_reports(
+    project_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+):
+    try:
+        return repository.list_reports(project_id, user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+# -----------------------------------------------------------------------------
+# 3) VIEW REPORT (secure)
+# -----------------------------------------------------------------------------
+@router.get(
+    "/{project_id}/reports/{report_id}",
+    response_model=ReportOut,
+    summary="Get full report details (secure)",
+)
+def get_report_details(
+    project_id: UUID,
+    report_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+):
+    # Enforce ownership via list_reports check pattern
+    try:
+        # ownership check
+        repository.list_reports(project_id, user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    data = repository.get_full_report_data(report_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    # Ensure report belongs to the provided project_id
+    if str(data["project_id"]) != str(project_id):
+        raise HTTPException(status_code=404, detail="Report not found in this project")
+
+    return data
+
+
+# -----------------------------------------------------------------------------
+# 4) PUBLIC VIEW (Treasury link)
+# -----------------------------------------------------------------------------
+@router.get(
+    "/public/view/{slug}",
+    response_model=ReportOut,
+    tags=["Public Reports"],
+    summary="Read-only report view for external stakeholders",
+)
+def get_public_report(slug: str):
+    report_id = repository.get_report_id_by_slug(slug)
+    if not report_id:
+        raise HTTPException(status_code=404, detail="Report link invalid or expired")
+
+    data = repository.get_full_report_data(report_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    return data\n--- ./app/reports/repository.py ---\n
+from __future__ import annotations
+
+import secrets
+from uuid import UUID
+from typing import List, Dict, Any, Optional
+
+from psycopg2.extras import Json
+from app.routers.projects import get_db_connection
+
+
+# -----------------------------------------------------------------------------
+# HELPERS
+# -----------------------------------------------------------------------------
+def _assert_project_owned(cur, project_id: UUID, user_id: str) -> None:
+    cur.execute(
+        "SELECT 1 FROM public.projects WHERE id = %s AND user_id = %s",
+        (str(project_id), user_id),
+    )
+    if not cur.fetchone():
+        raise ValueError("Project not found or not owned by user")
+
+
+def _generate_slug_short(length: int = 12) -> str:
+    """
+    Generates a short URL-safe slug ~length chars.
+    (token_urlsafe returns variable length; we slice.)
+    """
+    return secrets.token_urlsafe(16).replace("-", "").replace("_", "")[:length]
+
+
+def create_report(project_id: UUID, user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Creates a report bundle that references a simulation run (and optionally an AI insight).
+    Returns basic metadata + slug.
+    """
+    sql = """
+        INSERT INTO public.reports
+            (project_id, simulation_run_id, ai_insight_id, title, report_type, config, created_by, public_share_slug)
+        VALUES
+            (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING
+            id, project_id, title, report_type, status, public_share_slug, created_at;
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            _assert_project_owned(cur, project_id, user_id)
+
+            # slug retry loop (handles rare collision)
+            for _ in range(5):
+                slug = _generate_slug_short(12)
+                try:
+                    cur.execute(
+                        sql,
+                        (
+                            str(project_id),
+                            str(payload.get("simulation_run_id")),
+                            str(payload.get("ai_insight_id")) if payload.get("ai_insight_id") else None,
+                            payload.get("title"),
+                            payload.get("report_type"),
+                            Json(payload.get("config") or {}),
+                            user_id,
+                            slug,
+                        ),
+                    )
+                    row = cur.fetchone()
+                    cols = [d[0] for d in cur.description]
+                    conn.commit()
+                    return dict(zip(cols, row))
+                except Exception as e:
+                    # If unique constraint on slug was hit, retry.
+                    conn.rollback()
+                    msg = str(e).lower()
+                    if "public_share_slug" in msg or "duplicate key" in msg:
+                        continue
+                    raise
+
+            raise RuntimeError("Could not generate a unique public_share_slug after retries.")
+
+
+def list_reports(project_id: UUID, user_id: str) -> List[Dict[str, Any]]:
+    sql = """
+        SELECT id, project_id, title, report_type, status, public_share_slug, created_at
+        FROM public.reports
+        WHERE project_id = %s
+        ORDER BY created_at DESC;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            _assert_project_owned(cur, project_id, user_id)
+
+            cur.execute(sql, (str(project_id),))
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in rows]
+
+
+def get_full_report_data(report_id: UUID) -> Optional[Dict[str, Any]]:
+    """
+    Report view join: Report + Project + Simulation + AI Insight (optional).
+    Used by secure view and public view.
+    """
+    sql = """
+        SELECT
+            r.id, r.project_id, r.title, r.report_type, r.status, r.public_share_slug, r.created_at,
+            p.project_name, p.province,
+            sr.results_payload as simulation_data,
+            ai.content as ai_narrative
+        FROM public.reports r
+        JOIN public.projects p ON r.project_id = p.id
+        LEFT JOIN public.simulation_results sr ON r.simulation_run_id = sr.id
+        LEFT JOIN public.ai_insights ai ON r.ai_insight_id = ai.id
+        WHERE r.id = %s;
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (str(report_id),))
+            row = cur.fetchone()
+            if not row:
+                return None
+
+            (
+                rid, pid, title, rtype, status, slug, created_at,
+                project_name, province,
+                sim_data, ai_content
+            ) = row
+
+            return {
+                "id": rid,
+                "project_id": pid,
+                "title": title,
+                "report_type": rtype,
+                "status": status,
+                "public_share_slug": slug,
+                "created_at": created_at,
+                "simulation_data": sim_data,
+                "ai_narrative": ai_content,
+                "project_meta": {"name": project_name, "province": province},
+            }
+
+
+def get_report_id_by_slug(slug: str) -> Optional[UUID]:
+    sql = "SELECT id FROM public.reports WHERE public_share_slug = %s LIMIT 1;"
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (slug,))
+            row = cur.fetchone()
+            return row[0] if row else None\n--- ./requirements.txt ---\n
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.11.0
+certifi==2025.11.12
+cffi==2.0.0
+charset-normalizer==3.4.4
+click==8.3.1
+cryptography==46.0.3
+ecdsa==0.19.1
+et_xmlfile==2.0.0
+fastapi==0.121.3
+geographiclib==2.1
+geopy==2.4.1
+h11==0.16.0
+httptools==0.7.1
+idna==3.11
+numpy==2.3.5
+openpyxl==3.1.5
+pandas==2.3.3
+psycopg2-binary==2.9.11
+pyasn1==0.6.1
+pycparser==2.23
+pydantic==2.12.4
+pydantic_core==2.41.5
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.1
+python-jose==3.5.0
+python-multipart==0.0.20
+pytz==2025.2
+PyYAML==6.0.3
+requests==2.32.5
+rsa==4.9.1
+six==1.17.0
+sniffio==1.3.1
+starlette==0.50.0
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+tzdata==2025.2
+urllib3==2.5.0
+uvicorn==0.38.0
+uvloop==0.22.1
+watchfiles==1.1.1
+websockets==15.0.1
+openai\n--- ./generate_network_json.py ---\n
+import pandas as pd
+import json
+from pathlib import Path
+
+EXCEL_PATH = Path("network_inventory_geocoded.xlsx")
+OUT_PATH = Path("straatafrica-network.json")
+
+# In your current file, everything is in Sheet1
+SHEETS = ["Sheet1"]
+
+records = []
+
+for sheet in SHEETS:
+    df = pd.read_excel(EXCEL_PATH, sheet_name=sheet)
+
+    for idx, row in df.iterrows():
+        lat = row.get("Latitude")
+        lng = row.get("Longitude")
+
+        # skip if no coordinates
+        try:
+            lat_f = float(lat)
+            lng_f = float(lng)
+        except (TypeError, ValueError):
+            continue
+
+        # SA bounding box sanity-check
+        if not (-35 <= lat_f <= -22 and 16 <= lng_f <= 33):
+            continue
+
+        name = str(row.get("New Name") or "").strip()
+        district = str(row.get("District") or "").strip()
+        state = str(row.get("State") or "").strip()
+
+        # SAFE SCREEN COUNT
+        no_screens = row.get("No of Screens")
+        if pd.isna(no_screens):
+            no_screens = 1
+        else:
+            no_screens = int(no_screens)
+
+        # Handle routes (Start/End)
+        start = str(row.get("Start point ") or row.get("Start") or "").strip()
+        end = str(row.get("End point ") or row.get("End") or "").strip()
+
+        route = None
+        if start or end:
+            route = f"{start} – {end}".strip(" –")
+
+        rec = {
+            "id": f"{sheet.strip().replace(' ', '_')}_{idx}",
+            "name": name,
+            "rank": district,
+            "city": state,
+            "route": route,
+            "screens": no_screens,
+            "lat": lat_f,
+            "lng": lng_f,
+        }
+        records.append(rec)
+
+print(f"Collected {len(records)} locations")
+
+OUT_PATH.write_text(json.dumps(records, indent=2), encoding="utf-8")
+print(f"Written to {OUT_PATH}")
+\n--- ./generate_routes_json.py ---\n
+import json
+from pathlib import Path
+
+import pandas as pd
+from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
+
+EXCEL_PATH = Path("network_inventory_geocoded.xlsx")
+OUT_PATH = Path("straatafrica-routes.json")
+
+# Most of your data seems to live on one sheet now
+SHEET_NAME = "Sheet1"
+
+# --- Geocoder setup (Nominatim) ---
+geolocator = Nominatim(user_agent="straat-africa-routes")
+geocode_raw = geolocator.geocode
+geocode = RateLimiter(geocode_raw, min_delay_seconds=1.1)  # be gentle
+
+# Cache so we don't geocode same place 100 times
+cache = {}
+
+
+def geocode_cached(query: str):
+    """Geocode with in-memory cache."""
+    if not query or not query.strip():
+        return None
+    q = query.strip()
+    if q in cache:
+        return cache[q]
+
+    try:
+        loc = geocode(q)
+    except Exception:
+        loc = None
+
+    cache[q] = loc
+    return loc
+
+
+df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME)
+
+routes = []
+
+for idx, row in df.iterrows():
+    # Try to read start / end from the various column names
+    start = (
+        row.get("Start point ")
+        or row.get("Start point")
+        or row.get("Start")
+        or ""
+    )
+    end = (
+        row.get("End point ")
+        or row.get("End point")
+        or row.get("End")
+        or ""
+    )
+
+    start = str(start).strip()
+    end = str(end).strip()
+
+    # Skip rows without both start & end
+    if not start or not end:
+        continue
+
+    district = str(row.get("District") or "").strip()
+    state = str(row.get("State") or "").strip()
+
+    loads = str(
+        row.get("Loads per day")
+        or row.get("Loads Per Day")
+        or ""
+    ).strip()
+
+    # Build address strings (you can tweak if needed)
+    base_tail = ", South Africa"
+    start_query = ", ".join(
+        [p for p in [start, district, state] if p]
+    ) + base_tail
+    end_query = ", ".join(
+        [p for p in [end, district, state] if p]
+    ) + base_tail
+
+    print(f"\nRow {idx}: {start} → {end}")
+    print(f"  Start: {start_query}")
+    print(f"  End:   {end_query}")
+
+    start_loc = geocode_cached(start_query)
+    end_loc = geocode_cached(end_query)
+
+    if not start_loc or not end_loc:
+        print("  ✖ Could not geocode one of the points — skipping route.")
+        continue
+
+    # Bounding box sanity check (rough South Africa box)
+    def in_sa(lat, lng):
+        return (-35 <= lat <= -22) and (16 <= lng <= 33)
+
+    if not in_sa(start_loc.latitude, start_loc.longitude):
+        print("  ✖ Start outside SA bbox — skipping.")
+        continue
+    if not in_sa(end_loc.latitude, end_loc.longitude):
+        print("  ✖ End outside SA bbox — skipping.")
+        continue
+
+    route_rec = {
+        "id": f"route_{idx}",
+        "startName": start,
+        "endName": end,
+        "district": district,
+        "state": state,
+        "loadsPerDay": loads,  # still as text e.g. "6 loads per day"
+        "startLat": start_loc.latitude,
+        "startLng": start_loc.longitude,
+        "endLat": end_loc.latitude,
+        "endLng": end_loc.longitude,
+    }
+    routes.append(route_rec)
+    print(
+        f"  ✓ Route OK ({route_rec['startLat']:.5f},{route_rec['startLng']:.5f})"
+        f" → ({route_rec['endLat']:.5f},{route_rec['endLng']:.5f})"
+    )
+
+print(f"\nCollected {len(routes)} routes")
+
+OUT_PATH.write_text(json.dumps(routes, indent=2), encoding="utf-8")
+print(f"Written to {OUT_PATH}")
+\n--- ./geocode_missing_points.py ---\n
+import time
+import requests
+import pandas as pd
+from pathlib import Path
+
+# ------------- CONFIG -------------
+INPUT_FILE = "network_inventory.xlsx"
+OUTPUT_FILE = "network_inventory_geocoded.xlsx"
+
+# IMPORTANT: put your own email here so Nominatim is happy
+USER_EMAIL = "zakes201725@gmail.com"
+# ----------------------------------
+
+
+def clean_value(val: object) -> str:
+    """
+    Normalize a cell to a clean string.
+    Turn NaN/None/'nan' into '' so they are ignored.
+    """
+    if val is None:
+        return ""
+    s = str(val).strip()
+    if s == "" or s.lower() in {"nan", "none", "n/a"}:
+        return ""
+    return s
+
+
+def normalise_place_name(name: str) -> str:
+    """
+    Fix common spelling / formatting issues before geocoding.
+    """
+    if not name:
+        return name
+
+    n = name.strip()
+
+    # Fix common district / region typos and weird forms
+    lower = n.lower()
+
+    # 1) Richards Bay
+    if lower == "richardsbay":
+        return "Richards Bay"
+
+    # 2) King Sabata Dalindyebo / Mthatha region
+    if "king sebata dalindyebo" in lower or "king sabata dalindyebo" in lower:
+        # We can centre everything on Mthatha for mapping
+        return "Mthatha"
+
+    # 3) Capricorn District (correct spelling)
+    if "capricon district" in lower or "capricon" in lower:
+        return "Capricorn District Municipality"
+
+    return n
+
+
+def build_address(row: pd.Series) -> str:
+    """
+    Build a simpler address for geocoding:
+    Prefer District + State + Country, with some normalisation.
+    """
+    district_raw = clean_value(row.get("District", ""))
+    state_raw = clean_value(row.get("State", ""))
+    country = clean_value(row.get("Country", ""))
+    name_raw = clean_value(row.get("New Name", ""))
+
+    # Normalise
+    district = normalise_place_name(district_raw)
+    state = normalise_place_name(state_raw)
+    name = normalise_place_name(name_raw)
+
+    # Always force South Africa as a default country
+    if not country:
+        country = "South Africa"
+
+    parts = []
+
+    # 1) Best: District + State + Country
+    if district and state:
+        parts = [district, state, country]
+    # 2) Name + State + Country
+    elif name and state:
+        parts = [name, state, country]
+    # 3) District + Country
+    elif district:
+        parts = [district, country]
+    # 4) Name + Country
+    elif name:
+        parts = [name, country]
+    # 5) Just State + Country
+    elif state:
+        parts = [state, country]
+    else:
+        parts = [country]
+
+    return ", ".join(parts)
+
+
+def geocode(address: str) -> tuple[float | None, float | None]:
+    """
+    Call OpenStreetMap Nominatim to geocode an address.
+    Returns (lat, lon) or (None, None) if not found.
+    """
+    if not address:
+        return None, None
+
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {
+        "q": address,
+        "format": "json",
+        "limit": 1,
+        "addressdetails": 0,
+    }
+    headers = {
+        "User-Agent": f"StraatAfricaNetworkMap/1.0 ({USER_EMAIL})"
+    }
+
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if not data:
+            print(f"  ✖ No result for: {address}")
+            return None, None
+
+        first = data[0]
+        lat = float(first["lat"])
+        lon = float(first["lon"])
+        print(f"  ✓ {address} -> ({lat:.5f}, {lon:.5f})")
+        return lat, lon
+    except Exception as e:
+        print(f"  ! Error geocoding '{address}': {e}")
+        return None, None
+
+
+def reset_obviously_wrong_sa_points(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    For South Africa rows, reset any coordinates that are obviously not in SA
+    so they can be geocoded again.
+    SA roughly: lat in [-36, -22], lon in [16, 35].
+    """
+    lat = df["Latitude"]
+    lon = df["Longitude"]
+
+    invalid = (
+        lat.notna() & lon.notna() & (
+            (lat < -36) | (lat > -22) | (lon < 16) | (lon > 35)
+        )
+    )
+
+    if invalid.any():
+        print(f"Resetting {invalid.sum()} invalid coordinates (outside South Africa).")
+        df.loc[invalid, "Latitude"] = pd.NA
+        df.loc[invalid, "Longitude"] = pd.NA
+
+    return df
+
+
+def main():
+    path = Path(INPUT_FILE)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Could not find {INPUT_FILE} in this folder. "
+            f"Either rename your Excel file to this, or update INPUT_FILE in the script."
+        )
+
+    print(f"Loading workbook: {INPUT_FILE}")
+    df = pd.read_excel(path)
+
+    # Ensure the expected columns exist
+    required_cols = ["Latitude", "Longitude", "Country",
+                     "District", "State", "Start point ", "End point ", "New Name"]
+    for col in required_cols:
+        if col not in df.columns:
+            raise KeyError(f"Missing column in sheet: '{col}'")
+
+    # First reset any obviously wrong coordinates (like the -30.29, 153.12 ones)
+    df = reset_obviously_wrong_sa_points(df)
+
+    # Find rows with missing coordinates
+    mask_missing = df["Latitude"].isna() | df["Longitude"].isna()
+    missing_df = df[mask_missing]
+
+    print(f"Found {len(missing_df)} rows with missing coordinates.")
+
+    if missing_df.empty:
+        print("Nothing to geocode – all rows already have Lat/Lng.")
+    else:
+        for idx, row in missing_df.iterrows():
+            name = clean_value(row.get("New Name", ""))
+            print(f"\nRow {idx} — {name or '(no name)'}")
+
+            address = build_address(row)
+            print(f"  Address: {address}")
+
+            lat, lon = geocode(address)
+
+            if lat is not None and lon is not None:
+                df.at[idx, "Latitude"] = lat
+                df.at[idx, "Longitude"] = lon
+
+            # Be nice to the free Nominatim API (1 request per second)
+            time.sleep(1)
+
+    # Save output
+    out_path = path.with_name(OUTPUT_FILE)
+    df.to_excel(out_path, index=False)
+    print(f"\nDone. Saved updated workbook as: {out_path}")
+
+
+if __name__ == "__main__":
+    main()

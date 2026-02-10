@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends
 from uuid import UUID
 
-from app.routers.projects import get_current_user_id
+# --- CHANGED IMPORT BELOW ---
+from app.dependencies import get_current_user_id
 from .schemas import ForecastParametersOut, ForecastParametersPatch
 from . import service
 

@@ -6,7 +6,8 @@ from typing import List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from psycopg2.extras import Json
 
-from app.routers.projects import get_current_user_id, get_db_connection
+# --- CHANGED IMPORT BELOW ---
+from app.dependencies import get_current_user_id, get_db_connection
 from app.scenarios import service as scenario_service
 from . import engine, schemas
 
@@ -70,20 +71,20 @@ def run_simulation(
     final_run_name = options.run_name or f"Run {result.generated_at.strftime('%H:%M')}"
 
     sql_insert = """
-        INSERT INTO public.simulation_results
-            (project_id, scenario_id, results_payload, triggered_by, status,
+        INSERT INTO public.simulation_results 
+            (project_id, scenario_id, results_payload, triggered_by, status, 
              run_name, run_options, assumptions_snapshot, network_snapshot, notes)
-        VALUES
-            (%s, %s, %s, %s, 'completed',
+        VALUES 
+            (%s, %s, %s, %s, 'completed', 
              %s, %s, %s, %s, %s)
-        RETURNING
-            id, project_id, scenario_id, results_payload, run_at, triggered_by, status,
+        RETURNING 
+            id, project_id, scenario_id, results_payload, run_at, triggered_by, status, 
             run_name, run_options, assumptions_snapshot, network_snapshot, notes;
     """
 
     sql_update_project = """
-        UPDATE public.projects
-        SET active_simulation_run_id = %s, updated_at = NOW()
+        UPDATE public.projects 
+        SET active_simulation_run_id = %s, updated_at = NOW() 
         WHERE id = %s AND user_id = %s;
     """
 
@@ -138,26 +139,26 @@ def get_latest_simulation(
     _assert_project_owned(project_id, user_id)
 
     sql_check_active = """
-        SELECT active_simulation_run_id
-        FROM public.projects
+        SELECT active_simulation_run_id 
+        FROM public.projects 
         WHERE id = %s AND user_id = %s
     """
 
     sql_fetch_run = """
-        SELECT
-            id, project_id, scenario_id, results_payload, run_at, triggered_by, status,
+        SELECT 
+            id, project_id, scenario_id, results_payload, run_at, triggered_by, status, 
             run_name, run_options, assumptions_snapshot, network_snapshot, notes
         FROM public.simulation_results
         WHERE id = %s AND project_id = %s
     """
 
     sql_fallback = """
-        SELECT
-            id, project_id, scenario_id, results_payload, run_at, triggered_by, status,
+        SELECT 
+            id, project_id, scenario_id, results_payload, run_at, triggered_by, status, 
             run_name, run_options, assumptions_snapshot, network_snapshot, notes
         FROM public.simulation_results
         WHERE project_id = %s
-        ORDER BY run_at DESC
+        ORDER BY run_at DESC 
         LIMIT 1
     """
 
@@ -172,14 +173,14 @@ def get_latest_simulation(
             if active_id:
                 cur.execute(sql_fetch_run, (str(active_id), str(project_id)))
                 target_row = cur.fetchone()
-
+            
             if not target_row:
                 cur.execute(sql_fallback, (str(project_id),))
                 target_row = cur.fetchone()
-
+            
             if not target_row:
                 raise HTTPException(status_code=404, detail="No simulation results found.")
-
+            
             cols = [d[0] for d in cur.description]
             return dict(zip(cols, target_row))
 
@@ -200,12 +201,12 @@ def list_simulation_history(
     _assert_project_owned(project_id, user_id)
 
     sql = """
-        SELECT
-            id, project_id, scenario_id, results_payload, run_at, triggered_by, status,
+        SELECT 
+            id, project_id, scenario_id, results_payload, run_at, triggered_by, status, 
             run_name, run_options, assumptions_snapshot, network_snapshot, notes
         FROM public.simulation_results
         WHERE project_id = %s
-        ORDER BY run_at DESC
+        ORDER BY run_at DESC 
         LIMIT %s;
     """
 
@@ -235,8 +236,8 @@ def set_active_simulation(
     sql_verify = "SELECT 1 FROM public.simulation_results WHERE id = %s AND project_id = %s"
 
     sql_update = """
-        UPDATE public.projects
-        SET active_simulation_run_id = %s, updated_at = NOW()
+        UPDATE public.projects 
+        SET active_simulation_run_id = %s, updated_at = NOW() 
         WHERE id = %s AND user_id = %s
     """
 

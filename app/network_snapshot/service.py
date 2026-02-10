@@ -1,6 +1,7 @@
 from uuid import UUID
 from typing import Dict, Any
-from app.routers.projects import get_db_connection
+# --- CHANGED IMPORT BELOW ---
+from app.dependencies import get_db_connection
 
 def _n(x) -> float:
     """Helper to convert None to 0.0"""

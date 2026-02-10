@@ -4,7 +4,8 @@ from typing import List, Optional
 from uuid import UUID
 import pandas as pd
 import io
-from app.routers.projects import get_db_connection, get_current_user_id
+# --- CHANGED IMPORT BELOW ---
+from app.dependencies import get_db_connection, get_current_user_id
 
 router = APIRouter()
 
