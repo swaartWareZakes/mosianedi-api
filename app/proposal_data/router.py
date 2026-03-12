@@ -11,8 +11,8 @@ def _row_to_dict(cur, row) -> Dict[str, Any]:
     cols = [desc[0] for desc in cur.description]
     return dict(zip(cols, row))
 
-# --- NEW HELPER: Check Access (Owner OR Collaborator) ---
-def _has_access(conn, project_id: str, user_id: str) -> bool:
+# --- HELPER: Check Write Access (Owner OR Collaborator) ---
+def _has_write_access(conn, project_id: str, user_id: str) -> bool:
     with conn.cursor() as cur:
         # Check if user is owner OR is listed in collaborators for this project
         cur.execute("""
@@ -23,19 +23,16 @@ def _has_access(conn, project_id: str, user_id: str) -> bool:
         """, (project_id, user_id, user_id))
         return cur.fetchone() is not None
 
+
 @router.get(
     "/{project_id}/proposal-data",
     response_model=ProposalDataOut,
-    summary="Get proposal inputs for a project",
+    summary="Get proposal inputs for a project (Read-Only allowed)",
 )
 def get_proposal_data(project_id: UUID, user_id: str = Depends(get_current_user_id)):
     with get_db_connection() as conn:
-        # 1. Check Access first
-        if not _has_access(conn, str(project_id), user_id):
-             raise HTTPException(status_code=403, detail="Access denied to this project.")
-
-        # 2. Get Data (or create default row if missing)
-        # Note: We removed 'AND user_id = %s' so collaborators see the project's single source of truth.
+        # 1. READ BLOCK REMOVED: Anyone in the workspace can view the data.
+        
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT * FROM public.proposal_data 
@@ -45,16 +42,25 @@ def get_proposal_data(project_id: UUID, user_id: str = Depends(get_current_user_
             row = cur.fetchone()
             
             if not row:
+                # If no data exists yet, we must find the ACTUAL owner of the project
+                # so we don't accidentally assign the data row to the guest viewer.
+                cur.execute("SELECT user_id FROM public.projects WHERE id = %s", (str(project_id),))
+                owner_row = cur.fetchone()
+                if not owner_row:
+                    raise HTTPException(status_code=404, detail="Project not found.")
+                owner_id = owner_row[0]
+
                 # Create default row if missing (Auto-healing)
                 cur.execute("""
                     INSERT INTO public.proposal_data (project_id, user_id, data_source) 
                     VALUES (%s, %s, 'manual')
                     RETURNING *;
-                """, (str(project_id), user_id))
+                """, (str(project_id), owner_id))
                 conn.commit()
                 row = cur.fetchone()
 
             return _row_to_dict(cur, row)
+
 
 @router.patch(
     "/{project_id}/proposal-data",
@@ -67,9 +73,9 @@ def patch_proposal_data(
     user_id: str = Depends(get_current_user_id),
 ):
     with get_db_connection() as conn:
-        # 1. Check Access
-        if not _has_access(conn, str(project_id), user_id):
-             raise HTTPException(status_code=403, detail="Access denied.")
+        # 1. Check WRITE Access (Strict Server-Side Protection)
+        if not _has_write_access(conn, str(project_id), user_id):
+             raise HTTPException(status_code=403, detail="Access denied. You do not have edit rights.")
 
         data = payload.model_dump(exclude_unset=True)
         if not data:
@@ -110,5 +116,4 @@ def patch_proposal_data(
                 return _row_to_dict(cur, row)
         except Exception as e:
             conn.rollback()
-            # Log the error internally here if you have a logger
             raise HTTPException(status_code=500, detail=f"Failed to update proposal_data: {str(e)}")

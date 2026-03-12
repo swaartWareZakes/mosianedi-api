@@ -6,16 +6,14 @@ from typing import List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from psycopg2.extras import Json
 
-# --- CHANGED IMPORT BELOW ---
 from app.dependencies import get_current_user_id, get_db_connection
 from app.scenarios import service as scenario_service
 from . import engine, schemas
 
 router = APIRouter()
 
-
 # -----------------------------------------------------------------------------
-# Helper: verify project belongs to user (security + demo safety)
+# Helper: verify project belongs to user (security for WRITE actions)
 # -----------------------------------------------------------------------------
 def _assert_project_owned(project_id: UUID, user_id: str) -> None:
     sql = "SELECT 1 FROM public.projects WHERE id = %s AND user_id = %s"
@@ -23,11 +21,10 @@ def _assert_project_owned(project_id: UUID, user_id: str) -> None:
         with conn.cursor() as cur:
             cur.execute(sql, (str(project_id), user_id))
             if not cur.fetchone():
-                raise HTTPException(status_code=404, detail="Project not found.")
-
+                raise HTTPException(status_code=404, detail="Project not found or access denied for modification.")
 
 # -----------------------------------------------------------------------------
-# 1. RUN SIMULATION (Saves History + Snapshots) + set ACTIVE
+# 1. RUN SIMULATION (WRITE - KEEP STRICT)
 # -----------------------------------------------------------------------------
 @router.post(
     "/{project_id}/simulation/run",
@@ -41,7 +38,6 @@ def run_simulation(
 ):
     _assert_project_owned(project_id, user_id)
 
-    # 1) Load prerequisites
     try:
         scenario_params = scenario_service.get_forecast(project_id, user_id)
         from app.network_snapshot.service import get_network_snapshot
@@ -51,7 +47,6 @@ def run_simulation(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error loading prerequisites: {e}")
 
-    # 2) Run engine
     try:
         result = engine.run_ronet_simulation(
             project_id=project_id,
@@ -62,7 +57,6 @@ def run_simulation(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Simulation engine failed: {e}")
 
-    # 3) JSON-safe snapshots (IMPORTANT)
     assumptions_dict = scenario_params.model_dump(mode="json")
     run_options_dict = options.model_dump(mode="json", by_alias=True)
     results_dict = result.model_dump(mode="json")
@@ -91,14 +85,13 @@ def run_simulation(
     with get_db_connection() as conn:
         try:
             with conn.cursor() as cur:
-                # A) Insert the Simulation Result
                 cur.execute(
                     sql_insert,
                     (
                         str(project_id),
                         scenario_id,
                         Json(results_dict),
-                        user_id,  # sub from Supabase is a UUID string, OK for PG uuid
+                        user_id,  
                         final_run_name,
                         Json(run_options_dict),
                         Json(assumptions_dict),
@@ -107,10 +100,9 @@ def run_simulation(
                     ),
                 )
                 new_run_row = cur.fetchone()
-                cols = [d[0] for d in cur.description]  # ✅ capture NOW (before UPDATE)
+                cols = [d[0] for d in cur.description] 
                 new_run_id = new_run_row[0]
 
-                # B) Set active run (ownership safe)
                 cur.execute(sql_update_project, (str(new_run_id), str(project_id), user_id))
 
             conn.commit()
@@ -125,7 +117,7 @@ def run_simulation(
 
 
 # -----------------------------------------------------------------------------
-# 2. GET ACTIVE SIMULATION (proposal baseline)
+# 2. GET ACTIVE SIMULATION (READ - OPENED UP)
 # -----------------------------------------------------------------------------
 @router.get(
     "/{project_id}/simulation/latest",
@@ -136,12 +128,13 @@ def get_latest_simulation(
     project_id: UUID,
     user_id: str = Depends(get_current_user_id),
 ):
-    _assert_project_owned(project_id, user_id)
+    # REMOVED: _assert_project_owned(project_id, user_id)
 
+    # REMOVED: AND user_id = %s from this query
     sql_check_active = """
         SELECT active_simulation_run_id 
         FROM public.projects 
-        WHERE id = %s AND user_id = %s
+        WHERE id = %s
     """
 
     sql_fetch_run = """
@@ -164,7 +157,7 @@ def get_latest_simulation(
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql_check_active, (str(project_id), user_id))
+            cur.execute(sql_check_active, (str(project_id),))
             proj_row = cur.fetchone()
             active_id = proj_row[0] if proj_row else None
 
@@ -186,7 +179,7 @@ def get_latest_simulation(
 
 
 # -----------------------------------------------------------------------------
-# 3. LIST HISTORY
+# 3. LIST HISTORY (READ - OPENED UP)
 # -----------------------------------------------------------------------------
 @router.get(
     "/{project_id}/simulation/history",
@@ -198,7 +191,7 @@ def list_simulation_history(
     user_id: str = Depends(get_current_user_id),
     limit: int = Query(20, ge=1, le=100),
 ):
-    _assert_project_owned(project_id, user_id)
+    # REMOVED: _assert_project_owned(project_id, user_id)
 
     sql = """
         SELECT 
@@ -219,7 +212,7 @@ def list_simulation_history(
 
 
 # -----------------------------------------------------------------------------
-# 4. SET ACTIVE RUN
+# 4. SET ACTIVE RUN (WRITE - KEEP STRICT)
 # -----------------------------------------------------------------------------
 @router.post(
     "/{project_id}/simulation/active/{run_id}",

@@ -467,139 +467,129 @@ def reject_project(project_id: UUID, payload: ReviewAction, ctx: UserContext = D
 from fastapi import APIRouter, HTTPException, Depends
 from typing import List, Dict, Any
 from uuid import UUID
+import json
 
-# Ensure these imports exist in your project structure
 from app.db.schemas import ProjectMetadata, ProjectDB, ProjectOut 
 from app.dependencies import get_db_connection, get_user_context, UserContext, get_current_user_id
 
 router = APIRouter()
 
 def _row_to_dict(cur, row) -> Dict[str, Any]:
+    if not row:
+        return {}
     cols = [desc[0] for desc in cur.description]
     return dict(zip(cols, row))
 
-# --- LIST PROJECTS (Role Aware) ---
+# --- 1. LIST PROJECTS (Enterprise Transparent Workspace) ---
 @router.get("/", response_model=List[ProjectDB])
 def list_projects(ctx: UserContext = Depends(get_user_context)):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            if ctx.role == 'treasury':
-                # Treasury sees submitted work from ALL users
-                sql = """
-                    SELECT id, user_id, project_name, province, start_year, status, proposal_title, proposal_status, created_at, updated_at
-                    FROM public.projects
-                    WHERE status IN ('submitted', 'approved', 'rejected')
-                    ORDER BY updated_at DESC
-                """
-                cur.execute(sql)
-            else:
-                # Engineers see their OWN work OR work where they are a collaborator
-                sql = """
-                    SELECT DISTINCT p.id, p.user_id, p.project_name, p.province, p.start_year, p.status, p.proposal_title, p.proposal_status, p.created_at, p.updated_at
-                    FROM public.projects p
-                    LEFT JOIN public.project_collaborators pc ON p.id = pc.project_id
-                    WHERE p.user_id = %s OR pc.user_id = %s
-                    ORDER BY p.updated_at DESC
-                """
-                cur.execute(sql, (ctx.user_id, ctx.user_id))
+            select_cols = """
+                id, user_id, project_name, province, scope, municipality, local_area, 
+                route_name, start_point, end_point, route_length_km, surface_type, 
+                climate_zone, route_specific_vci, route_daily_traffic, start_year, 
+                status, proposal_title, proposal_status, created_at, updated_at
+            """
+            
+            # Everyone in the workspace can SEE the projects. 
+            # (The frontend UI handles locking them into Read-Only mode if they aren't the owner)
+            sql = f"""
+                SELECT DISTINCT {','.join(['p.' + c.strip() for c in select_cols.split(',')])}
+                FROM public.projects p
+                ORDER BY p.updated_at DESC
+            """
+            cur.execute(sql)
             
             rows = cur.fetchall()
             return [_row_to_dict(cur, r) for r in rows]
 
-# --- CREATE PROJECT ---
+# --- 2. CREATE PROJECT ---
 @router.post("/", status_code=201)
 def create_project(metadata: ProjectMetadata, ctx: UserContext = Depends(get_user_context)):
-    # 1. Project Header
     sql_project = """
-        INSERT INTO public.projects (user_id, project_name, province, start_year, status, locked)
-        VALUES (%s, %s, %s, %s, 'draft', false)
+        INSERT INTO public.projects (
+            user_id, project_name, province, scope, municipality, local_area, 
+            route_name, start_point, end_point, route_length_km, surface_type, 
+            climate_zone, route_specific_vci, route_daily_traffic, start_year, status, locked
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'planning', false)
         RETURNING id, created_at;
     """
-    # 2. Default Inputs
-    sql_proposal = "INSERT INTO public.proposal_data (project_id, user_id, data_source) VALUES (%s, %s, 'manual')"
-    
-    # 3. Default Assumptions
-    sql_assumptions = "INSERT INTO public.scenario_assumptions (project_id, user_id) VALUES (%s, %s)"
 
     with get_db_connection() as conn:
         try:
             with conn.cursor() as cur:
-                # A. Create Project
-                cur.execute(sql_project, (ctx.user_id, metadata.project_name, metadata.province, metadata.start_year))
+                cur.execute(sql_project, (
+                    ctx.user_id, metadata.project_name, metadata.province, metadata.scope,
+                    metadata.municipality, metadata.local_area, metadata.route_name,
+                    metadata.start_point, metadata.end_point, metadata.route_length_km,
+                    metadata.surface_type, metadata.climate_zone, metadata.route_specific_vci,
+                    metadata.route_daily_traffic, metadata.start_year
+                ))
                 row = cur.fetchone()
                 project_id, created_at = row
                 
-                # B. Initialize Inputs (Proposal Data)
-                cur.execute(sql_proposal, (str(project_id), ctx.user_id))
-
-                # C. Initialize Scenarios (Assumptions)
-                cur.execute(sql_assumptions, (str(project_id), ctx.user_id))
+                cur.execute("INSERT INTO public.proposal_data (project_id, user_id, data_source) VALUES (%s, %s, 'manual')", (str(project_id), ctx.user_id))
+                cur.execute("INSERT INTO public.scenario_assumptions (project_id, user_id) VALUES (%s, %s)", (str(project_id), ctx.user_id))
                 
-                # D. Log it
+                log_details = json.dumps({"scope": metadata.scope, "name": metadata.project_name})
                 cur.execute("""
                     INSERT INTO public.project_activity_log (project_id, user_id, action_type, details)
-                    VALUES (%s, %s, 'create', '{}')
-                """, (str(project_id), ctx.user_id))
+                    VALUES (%s, %s, 'create_project', %s)
+                """, (str(project_id), ctx.user_id, log_details))
                 
             conn.commit()
+            return {"id": str(project_id), "message": "Project initialized", "created_at": created_at.isoformat()}
+            
         except Exception as e:
             conn.rollback()
             raise HTTPException(status_code=500, detail=f"Failed to initialize project: {str(e)}")
 
-    return {"id": str(project_id), "message": "Project initialized", "created_at": created_at.isoformat()}
-
-# --- GET PROJECT (Single - Fixed for Collaboration) ---
+# --- 3. GET SINGLE PROJECT (Removed 403 Read Block) ---
 @router.get("/{project_id}", response_model=ProjectOut)
 def get_project(project_id: UUID, user_id: str = Depends(get_current_user_id)):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Check if user is owner OR a collaborator
+            # We no longer restrict by user_id here. Anyone with the ID can view metadata.
             cur.execute("""
-                SELECT p.* FROM public.projects p
-                LEFT JOIN public.project_collaborators pc ON p.id = pc.project_id
-                WHERE p.id = %s 
-                AND (p.user_id = %s OR pc.user_id = %s)
-            """, (str(project_id), user_id, user_id))
+                SELECT * FROM public.projects WHERE id = %s 
+            """, (str(project_id),))
             
-            project = cur.fetchone()
+            project_row = cur.fetchone()
             
-            if not project:
-                raise HTTPException(status_code=403, detail="Project not found or access denied")
+            if not project_row:
+                raise HTTPException(status_code=404, detail="Project not found.")
                 
-            cols = [desc[0] for desc in cur.description]
-            return dict(zip(cols, project))
+            return _row_to_dict(cur, project_row)
 
-# --- DELETE PROJECT ---
+# --- 4. DELETE PROJECT (Owner Only + Lock Protection remains enforced) ---
 @router.delete("/{project_id}", status_code=204)
 def delete_project(project_id: UUID, ctx: UserContext = Depends(get_user_context)):
-    # Check ownership (Collaborators usually CANNOT delete, only owners)
-    sql_check = "SELECT status, locked FROM public.projects WHERE id = %s AND user_id = %s"
-    sql_delete = "DELETE FROM public.projects WHERE id = %s"
-
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql_check, (str(project_id), ctx.user_id))
+            cur.execute("SELECT user_id, locked FROM public.projects WHERE id = %s", (str(project_id),))
             row = cur.fetchone()
             
             if not row:
-                # If row missing, check if it exists at all to give better error
-                cur.execute("SELECT 1 FROM public.projects WHERE id = %s", (str(project_id),))
-                if cur.fetchone():
-                     raise HTTPException(status_code=403, detail="Only the project owner can delete this project.")
                 raise HTTPException(status_code=404, detail="Project not found.")
             
-            status, locked = row
+            owner_id, locked = row
+            
+            # Delete operations are still strictly blocked!
+            if str(owner_id) != ctx.user_id:
+                raise HTTPException(status_code=403, detail="Only the project owner can delete this record.")
+            
             if locked:
-                raise HTTPException(status_code=400, detail="Cannot delete a locked/submitted project.")
+                raise HTTPException(status_code=400, detail="Cannot delete a locked or published project. Revert to draft first.")
 
-            cur.execute(sql_delete, (str(project_id),))
+            cur.execute("DELETE FROM public.projects WHERE id = %s", (str(project_id),))
             conn.commit()
 
-    return\n--- ./app/__init__.py ---\n
+    return None\n--- ./app/__init__.py ---\n
 \n--- ./app/network_snapshot/service.py ---\n
 from uuid import UUID
 from typing import Dict, Any
-# --- CHANGED IMPORT BELOW ---
 from app.dependencies import get_db_connection
 
 def _n(x) -> float:
@@ -607,14 +597,16 @@ def _n(x) -> float:
     return float(x or 0)
 
 def get_network_snapshot(project_id: UUID, user_id: str) -> Dict[str, Any]:
-    # 1. Fetch Proposal Inputs
+    # 1. Fetch Project Scope AND Proposal Inputs together
     sql = """
         SELECT 
-            paved_arid, paved_semi_arid, paved_dry_sub_humid, paved_moist_sub_humid, paved_humid,
-            gravel_arid, gravel_semi_arid, gravel_dry_sub_humid, gravel_moist_sub_humid, gravel_humid,
-            avg_vci_used, vehicle_km, fuel_sales
-        FROM public.proposal_data
-        WHERE project_id = %s AND user_id = %s
+            p.scope, p.route_length_km, p.surface_type, p.route_specific_vci, p.route_daily_traffic,
+            pd.paved_arid, pd.paved_semi_arid, pd.paved_dry_sub_humid, pd.paved_moist_sub_humid, pd.paved_humid,
+            pd.gravel_arid, pd.gravel_semi_arid, pd.gravel_dry_sub_humid, pd.gravel_moist_sub_humid, pd.gravel_humid,
+            pd.avg_vci_used, pd.vehicle_km, pd.fuel_sales
+        FROM public.projects p
+        LEFT JOIN public.proposal_data pd ON p.id = pd.project_id
+        WHERE p.id = %s AND p.user_id = %s
     """
     
     with get_db_connection() as conn:
@@ -622,7 +614,6 @@ def get_network_snapshot(project_id: UUID, user_id: str) -> Dict[str, Any]:
             cur.execute(sql, (str(project_id), user_id))
             row = cur.fetchone()
             
-            # If no data found, return zeros
             if not row:
                 return {
                     "totalLengthKm": 0, "pavedLengthKm": 0, "gravelLengthKm": 0,
@@ -631,35 +622,58 @@ def get_network_snapshot(project_id: UUID, user_id: str) -> Dict[str, Any]:
                 
             data = dict(zip([d[0] for d in cur.description], row))
 
-    # 2. Sum up lengths
-    paved_total = (
-        _n(data.get("paved_arid")) + _n(data.get("paved_semi_arid")) + 
-        _n(data.get("paved_dry_sub_humid")) + _n(data.get("paved_moist_sub_humid")) + _n(data.get("paved_humid"))
-    )
-    
-    gravel_total = (
-        _n(data.get("gravel_arid")) + _n(data.get("gravel_semi_arid")) + 
-        _n(data.get("gravel_dry_sub_humid")) + _n(data.get("gravel_moist_sub_humid")) + _n(data.get("gravel_humid"))
-    )
-    
-    total_km = paved_total + gravel_total
+    scope = data.get("scope")
+
+    # ==========================================
+    # ROUTE SCOPE LOGIC (Linear Asset)
+    # ==========================================
+    if scope == 'route':
+        length = _n(data.get("route_length_km"))
+        is_paved = data.get("surface_type") == 'paved'
+        
+        paved_total = length if is_paved else 0.0
+        gravel_total = length if not is_paved else 0.0
+        total_km = length
+        
+        vci = _n(data.get("route_specific_vci"))
+        traffic = _n(data.get("route_daily_traffic"))
+        fuel = 0.0 # Not typically tracked for a single route
+        
+    # ==========================================
+    # NETWORK SCOPE LOGIC (Provincial/Municipal/Local)
+    # ==========================================
+    else:
+        paved_total = (
+            _n(data.get("paved_arid")) + _n(data.get("paved_semi_arid")) + 
+            _n(data.get("paved_dry_sub_humid")) + _n(data.get("paved_moist_sub_humid")) + _n(data.get("paved_humid"))
+        )
+        
+        gravel_total = (
+            _n(data.get("gravel_arid")) + _n(data.get("gravel_semi_arid")) + 
+            _n(data.get("gravel_dry_sub_humid")) + _n(data.get("gravel_moist_sub_humid")) + _n(data.get("gravel_humid"))
+        )
+        
+        total_km = paved_total + gravel_total
+        vci = _n(data.get("avg_vci_used"))
+        traffic = _n(data.get("vehicle_km"))
+        fuel = _n(data.get("fuel_sales"))
 
     # 3. Calculate Asset Value (CRC)
-    # Using standard engineering estimates (adjust as needed)
     RATE_PAVED = 3_500_000   # R3.5m per km
     RATE_GRAVEL = 250_000    # R250k per km
     
     asset_value = (paved_total * RATE_PAVED) + (gravel_total * RATE_GRAVEL)
 
-    # 4. Return Flat Structure (matching React state)
+    # 4. Return Standardized Flat Structure
+    # (The simulation engine consumes this blindly, ensuring perfect compatibility!)
     return {
         "totalLengthKm": round(total_km, 2),
         "pavedLengthKm": round(paved_total, 2),
         "gravelLengthKm": round(gravel_total, 2),
-        "avgVci": _n(data.get("avg_vci_used")),
+        "avgVci": vci,
         "assetValue": round(asset_value, 2),
-        "totalVehicleKm": _n(data.get("vehicle_km")),
-        "fuelSales": _n(data.get("fuel_sales"))
+        "totalVehicleKm": traffic,
+        "fuelSales": fuel
     }\n--- ./app/network_snapshot/__init__.py ---\n
 # app/network_snapshot/__init__.py
 from .router import router  # re-export for easy import in main.py
@@ -722,12 +736,14 @@ def run_ronet_simulation(
     options: SimulationRunOptions,
 ) -> SimulationOutput:
     """
-    Enhanced RoNET-style simulation.
+    Enhanced RoNET-style simulation. 
+    Seamlessly handles both massive Networks and single Routes because 
+    the network_profile is pre-normalized.
     """
 
     yearly_results = []
 
-    # 1) Determine Scope
+    # 1) Determine Scope from normalized profile
     paved_km = network_profile.get("pavedLengthKm", 0) if options.include_paved else 0
     gravel_km = network_profile.get("gravelLengthKm", 0) if options.include_gravel else 0
 
@@ -739,7 +755,7 @@ def run_ronet_simulation(
     inflation = float(getattr(params, "cpi_percentage", 6.0) or 6.0) / 100.0
     discount_rate = float(getattr(params, "discount_rate", 8.0) or 8.0) / 100.0
 
-    # 4) Unit Costs
+    # 4) Unit Costs (Base maintenance needs)
     UNIT_COST_PAVED = 160_000
     UNIT_COST_GRAVEL = 45_000
 
@@ -749,7 +765,7 @@ def run_ronet_simulation(
     current_vci = float(network_profile.get("avgVci", 50) or 50)
     current_asset_value = float(network_profile.get("assetValue", 0) or 0)
     
-    # Recalculate asset value if it's missing but we have km
+    # Safety Recalculation
     if current_asset_value == 0 and (paved_km > 0 or gravel_km > 0):
          current_asset_value = (paved_km * 3500000) + (gravel_km * 250000)
 
@@ -759,7 +775,7 @@ def run_ronet_simulation(
         year = start_year + i
         year_inflation_factor = (1 + inflation) ** i
 
-        # A) Determine Demand
+        # A) Determine Demand based on condition multiplier
         condition_cost_factor = 1.0 + ((100 - current_vci) / 100.0)
         nominal_need = base_annual_need * condition_cost_factor * year_inflation_factor
 
@@ -782,7 +798,7 @@ def run_ronet_simulation(
         year_npv = actual_spend / discount_factor
         cumulative_npv += year_npv
 
-        # E) Distributions
+        # E) Distributions (Approximated for visuals)
         pct_good = max(0.0, min(100.0, (current_vci - 30) * 1.5))
         pct_poor = max(0.0, min(100.0, (70 - current_vci) * 1.5))
         pct_fair = max(0.0, 100.0 - pct_good - pct_poor)
@@ -1640,7 +1656,6 @@ from typing import Optional
 from datetime import datetime
 from uuid import UUID
 
-
 # ============================================================
 # PROJECT Schemas (proposal-first flow)
 # ============================================================
@@ -1649,6 +1664,19 @@ class ProjectMetadata(BaseModel):
     project_name: str
     province: str
     start_year: int
+    scope: str = 'provincial' # provincial, municipal, local, route
+    municipality: Optional[str] = None
+    local_area: Optional[str] = None
+    
+    # --- NEW FIELDS FOR ROUTE SCOPE ---
+    route_name: Optional[str] = None
+    start_point: Optional[str] = None
+    end_point: Optional[str] = None
+    route_length_km: Optional[float] = 0.0
+    surface_type: Optional[str] = 'paved'
+    climate_zone: Optional[str] = 'dry_sub_humid'
+    route_specific_vci: Optional[int] = None
+    route_daily_traffic: Optional[int] = None
 
 
 class ProjectDB(BaseModel):
@@ -1657,6 +1685,19 @@ class ProjectDB(BaseModel):
     project_name: str
     province: str
     start_year: int
+    scope: Optional[str] = 'provincial'
+    municipality: Optional[str] = None
+    local_area: Optional[str] = None
+    
+    # --- ROUTE DATA ---
+    route_name: Optional[str] = None
+    start_point: Optional[str] = None
+    end_point: Optional[str] = None
+    route_length_km: Optional[float] = 0.0
+    surface_type: Optional[str] = 'paved'
+    climate_zone: Optional[str] = 'dry_sub_humid'
+    route_specific_vci: Optional[int] = None
+    route_daily_traffic: Optional[int] = None
     
     # Status fields from DB
     status: Optional[str] = None
@@ -1669,13 +1710,27 @@ class ProjectDB(BaseModel):
     class Config:
         from_attributes = True
 
-# --- NEW SCHEMA ---
+
 class ProjectOut(BaseModel):
     id: UUID
     user_id: UUID
     project_name: str
     province: str
     start_year: int
+    scope: Optional[str] = 'provincial'
+    municipality: Optional[str] = None
+    local_area: Optional[str] = None
+    
+    # --- ROUTE DATA ---
+    route_name: Optional[str] = None
+    start_point: Optional[str] = None
+    end_point: Optional[str] = None
+    route_length_km: Optional[float] = 0.0
+    surface_type: Optional[str] = 'paved'
+    climate_zone: Optional[str] = 'dry_sub_humid'
+    route_specific_vci: Optional[int] = None
+    route_daily_traffic: Optional[int] = None
+    
     status: str
     locked: bool
     created_at: datetime

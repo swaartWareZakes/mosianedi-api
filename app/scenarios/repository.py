@@ -18,6 +18,7 @@ def ensure_assumptions_row(project_id: UUID, user_id: str) -> None:
         conn.commit()
 
 def get_forecast_params(project_id: UUID, user_id: str) -> Optional[Dict[str, Any]]:
+    # REMOVED the strict 'AND user_id = %s' so guests can read the forecast data
     sql = """
         SELECT 
             id, project_id, updated_at, 
@@ -25,11 +26,11 @@ def get_forecast_params(project_id: UUID, user_id: str) -> Optional[Dict[str, An
             cpi_percentage, previous_allocation, 
             paved_deterioration_rate, gravel_loss_rate, climate_stress_factor
         FROM public.scenario_assumptions
-        WHERE project_id = %s AND user_id = %s
+        WHERE project_id = %s 
     """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (str(project_id), user_id))
+            cur.execute(sql, (str(project_id),))
             row = cur.fetchone()
             if not row:
                 return None

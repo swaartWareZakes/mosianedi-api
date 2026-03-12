@@ -7,7 +7,7 @@ def _n(x) -> float:
     return float(x or 0)
 
 def get_network_snapshot(project_id: UUID, user_id: str) -> Dict[str, Any]:
-    # 1. Fetch Project Scope AND Proposal Inputs together
+    # REMOVED the strict 'AND p.user_id = %s' so guests can read the snapshot
     sql = """
         SELECT 
             p.scope, p.route_length_km, p.surface_type, p.route_specific_vci, p.route_daily_traffic,
@@ -16,12 +16,12 @@ def get_network_snapshot(project_id: UUID, user_id: str) -> Dict[str, Any]:
             pd.avg_vci_used, pd.vehicle_km, pd.fuel_sales
         FROM public.projects p
         LEFT JOIN public.proposal_data pd ON p.id = pd.project_id
-        WHERE p.id = %s AND p.user_id = %s
+        WHERE p.id = %s
     """
     
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (str(project_id), user_id))
+            cur.execute(sql, (str(project_id),))
             row = cur.fetchone()
             
             if not row:
@@ -34,9 +34,6 @@ def get_network_snapshot(project_id: UUID, user_id: str) -> Dict[str, Any]:
 
     scope = data.get("scope")
 
-    # ==========================================
-    # ROUTE SCOPE LOGIC (Linear Asset)
-    # ==========================================
     if scope == 'route':
         length = _n(data.get("route_length_km"))
         is_paved = data.get("surface_type") == 'paved'
@@ -47,11 +44,8 @@ def get_network_snapshot(project_id: UUID, user_id: str) -> Dict[str, Any]:
         
         vci = _n(data.get("route_specific_vci"))
         traffic = _n(data.get("route_daily_traffic"))
-        fuel = 0.0 # Not typically tracked for a single route
+        fuel = 0.0 
         
-    # ==========================================
-    # NETWORK SCOPE LOGIC (Provincial/Municipal/Local)
-    # ==========================================
     else:
         paved_total = (
             _n(data.get("paved_arid")) + _n(data.get("paved_semi_arid")) + 
@@ -68,14 +62,11 @@ def get_network_snapshot(project_id: UUID, user_id: str) -> Dict[str, Any]:
         traffic = _n(data.get("vehicle_km"))
         fuel = _n(data.get("fuel_sales"))
 
-    # 3. Calculate Asset Value (CRC)
-    RATE_PAVED = 3_500_000   # R3.5m per km
-    RATE_GRAVEL = 250_000    # R250k per km
+    RATE_PAVED = 3_500_000   
+    RATE_GRAVEL = 250_000    
     
     asset_value = (paved_total * RATE_PAVED) + (gravel_total * RATE_GRAVEL)
 
-    # 4. Return Standardized Flat Structure
-    # (The simulation engine consumes this blindly, ensuring perfect compatibility!)
     return {
         "totalLengthKm": round(total_km, 2),
         "pavedLengthKm": round(paved_total, 2),
