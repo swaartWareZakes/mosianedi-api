@@ -14,12 +14,14 @@ def run_ronet_simulation(
     options: SimulationRunOptions,
 ) -> SimulationOutput:
     """
-    Enhanced RoNET-style simulation.
+    Enhanced RoNET-style simulation. 
+    Seamlessly handles both massive Networks and single Routes because 
+    the network_profile is pre-normalized.
     """
 
     yearly_results = []
 
-    # 1) Determine Scope
+    # 1) Determine Scope from normalized profile
     paved_km = network_profile.get("pavedLengthKm", 0) if options.include_paved else 0
     gravel_km = network_profile.get("gravelLengthKm", 0) if options.include_gravel else 0
 
@@ -31,7 +33,7 @@ def run_ronet_simulation(
     inflation = float(getattr(params, "cpi_percentage", 6.0) or 6.0) / 100.0
     discount_rate = float(getattr(params, "discount_rate", 8.0) or 8.0) / 100.0
 
-    # 4) Unit Costs
+    # 4) Unit Costs (Base maintenance needs)
     UNIT_COST_PAVED = 160_000
     UNIT_COST_GRAVEL = 45_000
 
@@ -41,7 +43,7 @@ def run_ronet_simulation(
     current_vci = float(network_profile.get("avgVci", 50) or 50)
     current_asset_value = float(network_profile.get("assetValue", 0) or 0)
     
-    # Recalculate asset value if it's missing but we have km
+    # Safety Recalculation
     if current_asset_value == 0 and (paved_km > 0 or gravel_km > 0):
          current_asset_value = (paved_km * 3500000) + (gravel_km * 250000)
 
@@ -51,7 +53,7 @@ def run_ronet_simulation(
         year = start_year + i
         year_inflation_factor = (1 + inflation) ** i
 
-        # A) Determine Demand
+        # A) Determine Demand based on condition multiplier
         condition_cost_factor = 1.0 + ((100 - current_vci) / 100.0)
         nominal_need = base_annual_need * condition_cost_factor * year_inflation_factor
 
@@ -74,7 +76,7 @@ def run_ronet_simulation(
         year_npv = actual_spend / discount_factor
         cumulative_npv += year_npv
 
-        # E) Distributions
+        # E) Distributions (Approximated for visuals)
         pct_good = max(0.0, min(100.0, (current_vci - 30) * 1.5))
         pct_poor = max(0.0, min(100.0, (70 - current_vci) * 1.5))
         pct_fair = max(0.0, 100.0 - pct_good - pct_poor)
